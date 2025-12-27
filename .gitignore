@@ -1,0 +1,8 @@
+# Local-only
+/AGENTS.md
+/tmp/
+/tmp-*/
+
+# OS
+.DS_Store
+
