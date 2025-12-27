@@ -2,5 +2,6 @@
 
 Offline signer for `TxPlan` packages.
 
-Status: work in progress.
+Intended for hot/warm/cold key tiering and HSM/airgapped workflows.
 
+Status: work in progress.
