@@ -33,3 +33,12 @@ func EntropyBase64FromMnemonic(mnemonic string) (string, error) {
 	}
 	return base64.StdEncoding.EncodeToString(entropy), nil
 }
+
+func SeedBase64FromMnemonic(mnemonic string) (string, error) {
+	mnemonic = strings.TrimSpace(mnemonic)
+	seed, err := bip39.NewSeedWithErrorChecking(mnemonic, "")
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(seed), nil
+}

@@ -76,8 +76,8 @@ fn read_compact_size(input: &mut &[u8]) -> Result<u64, Zip316Error> {
 }
 
 fn decode_zip316_bech32m(hrp_expected: &str, s: &str) -> Result<Vec<u8>, Zip316Error> {
-    let checked =
-        CheckedHrpstring::new::<Bech32mUnlimited>(s).map_err(|_| Zip316Error::Bech32DecodeFailed)?;
+    let checked = CheckedHrpstring::new::<Bech32mUnlimited>(s)
+        .map_err(|_| Zip316Error::Bech32DecodeFailed)?;
 
     if checked.hrp().as_str() != hrp_expected {
         return Err(Zip316Error::HrpMismatch);

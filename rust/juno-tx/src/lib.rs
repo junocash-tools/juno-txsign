@@ -38,7 +38,8 @@ use transparent::{
 };
 use zcash_script::script;
 
-const HRP_JUNO_UA: &str = "j";
+const HRP_JUNO_UA_MAIN: &str = "j";
+const HRP_JUNO_UA_REGTEST: &str = "jregtest";
 const TYPECODE_ORCHARD: u64 = 0x03;
 
 // Juno Cash transparent P2PKH Base58Check version bytes.
@@ -190,17 +191,21 @@ fn decode_orchard_address(addr: &str) -> Result<OrchardAddress, TxBuildError> {
     if a.is_empty() {
         return Err(TxBuildError::AddressInvalid);
     }
-    let (typecode, value) =
-        zip316::decode_single_tlv_container(HRP_JUNO_UA, a).map_err(|_| TxBuildError::AddressInvalid)?;
-    if typecode != TYPECODE_ORCHARD {
-        return Err(TxBuildError::AddressInvalid);
+    for hrp in [HRP_JUNO_UA_MAIN, HRP_JUNO_UA_REGTEST] {
+        let Ok((typecode, value)) = zip316::decode_single_tlv_container(hrp, a) else {
+            continue;
+        };
+        if typecode != TYPECODE_ORCHARD {
+            continue;
+        }
+        let raw: [u8; 43] = value.try_into().map_err(|_| TxBuildError::AddressInvalid)?;
+        let ct = orchard::Address::from_raw_address_bytes(&raw);
+        if bool::from(ct.is_none()) {
+            continue;
+        }
+        return Ok(ct.unwrap());
     }
-    let raw: [u8; 43] = value.try_into().map_err(|_| TxBuildError::AddressInvalid)?;
-    let ct = orchard::Address::from_raw_address_bytes(&raw);
-    if bool::from(ct.is_none()) {
-        return Err(TxBuildError::AddressInvalid);
-    }
-    Ok(ct.unwrap())
+    Err(TxBuildError::AddressInvalid)
 }
 
 fn empty_memo() -> [u8; 512] {
@@ -210,7 +215,9 @@ fn empty_memo() -> [u8; 512] {
 }
 
 fn memo_bytes(memo: Option<&str>) -> Result<[u8; 512], TxBuildError> {
-    let Some(m) = memo else { return Ok(empty_memo()) };
+    let Some(m) = memo else {
+        return Ok(empty_memo());
+    };
     let trimmed = m.trim();
     if trimmed.is_empty() {
         return Ok(empty_memo());
@@ -227,7 +234,9 @@ fn memo_bytes(memo: Option<&str>) -> Result<[u8; 512], TxBuildError> {
 }
 
 fn memo_bytes_hex(memo_hex: Option<&str>) -> Result<[u8; 512], TxBuildError> {
-    let Some(m) = memo_hex else { return Ok(empty_memo()) };
+    let Some(m) = memo_hex else {
+        return Ok(empty_memo());
+    };
     let trimmed = m.trim();
     if trimmed.is_empty() {
         return Ok(empty_memo());
@@ -375,12 +384,8 @@ fn derive_transparent_keypair(
     let (sk_m, cc_m) = bip32_master(seed)?;
     let (sk1, cc1) =
         bip32_derive_child_private_key(&secp, &sk_m, &cc_m, 44 | BIP32_HARDENED_KEY_LIMIT)?;
-    let (sk2, cc2) = bip32_derive_child_private_key(
-        &secp,
-        &sk1,
-        &cc1,
-        coin_type | BIP32_HARDENED_KEY_LIMIT,
-    )?;
+    let (sk2, cc2) =
+        bip32_derive_child_private_key(&secp, &sk1, &cc1, coin_type | BIP32_HARDENED_KEY_LIMIT)?;
     let (sk3, cc3) = bip32_derive_child_private_key(
         &secp,
         &sk2,
@@ -418,9 +423,7 @@ fn required_fee_send(spend_count: usize) -> Result<Zatoshis, TxBuildError> {
 
 fn required_fee_shield(input_count: usize) -> Result<Zatoshis, TxBuildError> {
     // ZIP-317: logical_actions = t_inputs + orchard_actions(2), fee = 5000 * logical_actions.
-    let actions = input_count
-        .checked_add(2)
-        .ok_or(TxBuildError::FeeInvalid)?;
+    let actions = input_count.checked_add(2).ok_or(TxBuildError::FeeInvalid)?;
     let fee = 5_000u64
         .checked_mul(actions as u64)
         .ok_or(TxBuildError::FeeInvalid)?;
@@ -484,8 +487,8 @@ fn build_send(req: &TxRequest) -> Result<(String, String, String), TxBuildError>
     let mut seed = decode_seed(seed_base64)?;
     let res = (|| -> Result<(String, String, String), TxBuildError> {
         let acc = zip32::AccountId::try_from(*account).map_err(|_| TxBuildError::AccountInvalid)?;
-        let sk =
-            SpendingKey::from_zip32_seed(&seed, *coin_type, acc).map_err(|_| TxBuildError::SeedInvalid)?;
+        let sk = SpendingKey::from_zip32_seed(&seed, *coin_type, acc)
+            .map_err(|_| TxBuildError::SeedInvalid)?;
         let fvk = FullViewingKey::from(&sk);
         let sak = SpendAuthorizingKey::from(&sk);
         let pivk_external = fvk.to_ivk(Scope::External).prepare();
@@ -532,12 +535,8 @@ fn build_send(req: &TxRequest) -> Result<(String, String, String), TxBuildError>
             let epk_bytes = parse_hex::<32>(&n.ephemeral_key, TxBuildError::NotesInvalid)?;
             let enc_bytes = parse_hex::<52>(&n.enc_ciphertext, TxBuildError::NotesInvalid)?;
 
-            let compact = CompactAction::from_parts(
-                nf_old,
-                cmx,
-                EphemeralKeyBytes(epk_bytes),
-                enc_bytes,
-            );
+            let compact =
+                CompactAction::from_parts(nf_old, cmx, EphemeralKeyBytes(epk_bytes), enc_bytes);
             let domain = OrchardDomain::for_compact_action(&compact);
 
             let (note, _) = try_compact_note_decryption(&domain, &pivk_external, &compact)
@@ -618,7 +617,8 @@ fn build_send(req: &TxRequest) -> Result<(String, String, String), TxBuildError>
             );
 
         let txid_parts = unauthed.digest(TxIdDigester);
-        let shielded_sig_commitment = signature_hash(&unauthed, &SignableInput::Shielded, &txid_parts);
+        let shielded_sig_commitment =
+            signature_hash(&unauthed, &SignableInput::Shielded, &txid_parts);
 
         let mut rng = OsRng;
         let orchard_bundle = unauthed
@@ -626,7 +626,13 @@ fn build_send(req: &TxRequest) -> Result<(String, String, String), TxBuildError>
             .cloned()
             .map(|b| {
                 b.create_proof(orchard_proving_key(), &mut rng)
-                    .and_then(|b| b.apply_signatures(&mut OsRng, *shielded_sig_commitment.as_ref(), &[sak.clone()]))
+                    .and_then(|b| {
+                        b.apply_signatures(
+                            &mut OsRng,
+                            *shielded_sig_commitment.as_ref(),
+                            &[sak.clone()],
+                        )
+                    })
             })
             .transpose()
             .map_err(|_| TxBuildError::TxBuildFailed)?
@@ -642,12 +648,19 @@ fn build_send(req: &TxRequest) -> Result<(String, String, String), TxBuildError>
             None,
             Some(orchard_bundle),
         );
-        let tx = authorized.freeze().map_err(|_| TxBuildError::TxBuildFailed)?;
+        let tx = authorized
+            .freeze()
+            .map_err(|_| TxBuildError::TxBuildFailed)?;
 
         let mut bytes = Vec::new();
-        tx.write(&mut bytes).map_err(|_| TxBuildError::TxBuildFailed)?;
+        tx.write(&mut bytes)
+            .map_err(|_| TxBuildError::TxBuildFailed)?;
 
-        Ok((tx.txid().to_string(), hex::encode(bytes), fee_u64.to_string()))
+        Ok((
+            tx.txid().to_string(),
+            hex::encode(bytes),
+            fee_u64.to_string(),
+        ))
     })();
 
     seed.zeroize();
@@ -717,8 +730,13 @@ fn build_shield(req: &TxRequest) -> Result<(String, String, String), TxBuildErro
             std::collections::BTreeMap::new();
         'outer: for index in 0..=*max_address_index {
             for change in [0u32, 1u32] {
-                let (sk, pk, addr) =
-                    derive_transparent_keypair(&seed, *coin_type, *transparent_account, change, index)?;
+                let (sk, pk, addr) = derive_transparent_keypair(
+                    &seed,
+                    *coin_type,
+                    *transparent_account,
+                    change,
+                    index,
+                )?;
                 if needed_addrs.contains(&addr) && !derived.contains_key(&addr) {
                     derived.insert(addr, (sk, pk));
                     if derived.len() == needed_addrs.len() {
@@ -737,17 +755,17 @@ fn build_shield(req: &TxRequest) -> Result<(String, String, String), TxBuildErro
 
         for u in utxos {
             let a = u.address.trim();
-            let (sk, pk) = derived
-                .get(a)
-                .ok_or(TxBuildError::TransparentKeyNotFound)?;
+            let (sk, pk) = derived.get(a).ok_or(TxBuildError::TransparentKeyNotFound)?;
 
             // Ensure the signing set contains this key.
             let _ = signing_set.add_key(*sk);
 
             let txid_bytes = parse_txid_display_hex(&u.txid)?;
             let outpoint = OutPoint::new(txid_bytes, u.vout);
-            let value_u64 = parse_u64_decimal(&u.value_zat).map_err(|_| TxBuildError::TransparentUTXOInvalid)?;
-            let value = Zatoshis::from_u64(value_u64).map_err(|_| TxBuildError::TransparentUTXOInvalid)?;
+            let value_u64 = parse_u64_decimal(&u.value_zat)
+                .map_err(|_| TxBuildError::TransparentUTXOInvalid)?;
+            let value =
+                Zatoshis::from_u64(value_u64).map_err(|_| TxBuildError::TransparentUTXOInvalid)?;
             let script_pubkey = parse_transparent_script(&u.script_pub_key_hex)?;
             let coin = TransparentTxOut::new(value, script_pubkey);
 
@@ -819,7 +837,8 @@ fn build_shield(req: &TxRequest) -> Result<(String, String, String), TxBuildErro
             .map_err(|_| TxBuildError::TxBuildFailed)?
             .ok_or(TxBuildError::TxBuildFailed)?;
 
-        let shielded_sig_commitment = signature_hash(&unauthed, &SignableInput::Shielded, &txid_parts);
+        let shielded_sig_commitment =
+            signature_hash(&unauthed, &SignableInput::Shielded, &txid_parts);
 
         let mut rng = OsRng;
         let orchard_bundle = unauthed
@@ -827,7 +846,9 @@ fn build_shield(req: &TxRequest) -> Result<(String, String, String), TxBuildErro
             .cloned()
             .map(|b| {
                 b.create_proof(orchard_proving_key(), &mut rng)
-                    .and_then(|b| b.apply_signatures(&mut rng, *shielded_sig_commitment.as_ref(), &[]))
+                    .and_then(|b| {
+                        b.apply_signatures(&mut rng, *shielded_sig_commitment.as_ref(), &[])
+                    })
             })
             .transpose()
             .map_err(|_| TxBuildError::TxBuildFailed)?
@@ -843,11 +864,18 @@ fn build_shield(req: &TxRequest) -> Result<(String, String, String), TxBuildErro
             None,
             Some(orchard_bundle),
         );
-        let tx = authorized.freeze().map_err(|_| TxBuildError::TxBuildFailed)?;
+        let tx = authorized
+            .freeze()
+            .map_err(|_| TxBuildError::TxBuildFailed)?;
         let mut bytes = Vec::new();
-        tx.write(&mut bytes).map_err(|_| TxBuildError::TxBuildFailed)?;
+        tx.write(&mut bytes)
+            .map_err(|_| TxBuildError::TxBuildFailed)?;
 
-        Ok((tx.txid().to_string(), hex::encode(bytes), fee_u64.to_string()))
+        Ok((
+            tx.txid().to_string(),
+            hex::encode(bytes),
+            fee_u64.to_string(),
+        ))
     })();
 
     seed.zeroize();
@@ -897,7 +925,9 @@ pub extern "C" fn juno_tx_build_tx_json(req_json: *const c_char) -> *mut c_char 
 
         match handle(parsed) {
             Ok(v) => v,
-            Err(e) => TxResponse::Err { error: e.to_string() },
+            Err(e) => TxResponse::Err {
+                error: e.to_string(),
+            },
         }
     });
 

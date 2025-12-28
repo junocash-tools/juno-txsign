@@ -132,6 +132,10 @@ func BuildOrchardIndex(ctx context.Context, rpc *junocashd.Client, upToHeight in
 				if !is32ByteHex(act.CMX) || !is32ByteHex(act.Nullifier) || !is32ByteHex(act.EphemeralKey) {
 					return OrchardIndex{}, errors.New("chain: invalid orchard action encoding")
 				}
+				if len(act.EncCiphertext) < 104 {
+					return OrchardIndex{}, errors.New("chain: invalid orchard action encoding")
+				}
+				act.EncCiphertext = act.EncCiphertext[:104]
 				if _, err := hex.DecodeString(act.EncCiphertext); err != nil {
 					return OrchardIndex{}, errors.New("chain: invalid orchard action encoding")
 				}
@@ -153,4 +157,3 @@ func is32ByteHex(s string) bool {
 	_, err := hex.DecodeString(s)
 	return err == nil
 }
-

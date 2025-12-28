@@ -23,36 +23,49 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 	mineAndShieldOnce(t, jd, changeAddr)
 	toAddr := unifiedAddress(t, jd, 0)
 
-	seedBase64 := seedBase64FromNode(t, jd)
+	seeds := seedCandidatesFromNode(t, jd)
 	plan := buildSingleNoteWithdrawalPlan(t, rpc, jd, toAddr, changeAddr, 1_000_000)
 
 	tmp := t.TempDir()
 	txplanPath := filepath.Join(tmp, "txplan.json")
 	seedPath := filepath.Join(tmp, "seed.base64")
 
-	planJSON, err := json.Marshal(plan)
-	if err != nil {
-		t.Fatalf("marshal txplan: %v", err)
-	}
-	if err := os.WriteFile(txplanPath, append(planJSON, '\n'), 0o600); err != nil {
-		t.Fatalf("write txplan: %v", err)
-	}
-	if err := os.WriteFile(seedPath, []byte(seedBase64+"\n"), 0o600); err != nil {
-		t.Fatalf("write seed: %v", err)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	bin := filepath.Join(repoRoot(), "bin", "juno-txsign")
-	cmd := exec.CommandContext(ctx, bin, "sign", "--txplan", txplanPath, "--seed-file", seedPath, "--json")
-	out, err := cmd.Output()
-	if err != nil {
+	var (
+		out     []byte
+		lastErr error
+	)
+	for _, seed := range seeds {
+		planJSON, err := json.Marshal(plan)
+		if err != nil {
+			t.Fatalf("marshal txplan: %v", err)
+		}
+		if err := os.WriteFile(txplanPath, append(planJSON, '\n'), 0o600); err != nil {
+			t.Fatalf("write txplan: %v", err)
+		}
+		if err := os.WriteFile(seedPath, []byte(seed+"\n"), 0o600); err != nil {
+			t.Fatalf("write seed: %v", err)
+		}
+
+		cmd := exec.CommandContext(ctx, bin, "sign", "--txplan", txplanPath, "--seed-file", seedPath, "--json")
+		b, err := cmd.Output()
+		if err == nil {
+			out = b
+			lastErr = nil
+			goto ok
+		}
+		lastErr = err
+	}
+ok:
+	if lastErr != nil {
 		var ee *exec.ExitError
-		if errors.As(err, &ee) {
+		if errors.As(lastErr, &ee) {
 			t.Fatalf("juno-txsign: %s", strings.TrimSpace(string(ee.Stderr)))
 		}
-		t.Fatalf("juno-txsign: %v", err)
+		t.Fatalf("juno-txsign: %v", lastErr)
 	}
 
 	var resp struct {

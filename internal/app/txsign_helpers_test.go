@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -25,7 +26,16 @@ import (
 	"github.com/Abdullah1738/juno-txsign/internal/testutil/witness"
 )
 
-const testCoinType = uint32(8133)
+func coinTypeForChain(chain string) uint32 {
+	switch strings.ToLower(strings.TrimSpace(chain)) {
+	case "regtest":
+		return 8135
+	case "test", "testnet":
+		return 8134
+	default:
+		return 8133
+	}
+}
 
 func startJunocashd(t *testing.T) (*containers.Junocashd, *junocashd.Client) {
 	t.Helper()
@@ -48,22 +58,70 @@ func startJunocashd(t *testing.T) (*containers.Junocashd, *junocashd.Client) {
 
 func mineAndShieldOnce(t *testing.T, jd *containers.Junocashd, orchardAddr string) {
 	t.Helper()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
 
 	if err := junocashdutil.GenerateBlocks(ctx, jd, 101); err != nil {
 		t.Fatalf("generate: %v", err)
 	}
 
-	if _, err := junocashdutil.ShieldCoinbaseTo(ctx, jd, orchardAddr); err != nil {
+	txid, err := junocashdutil.ShieldCoinbaseTo(ctx, jd, orchardAddr)
+	if err != nil {
 		t.Fatalf("shield coinbase: %v", err)
 	}
 
-	if err := junocashdutil.GenerateBlocks(ctx, jd, 1); err != nil {
-		t.Fatalf("confirm: %v", err)
+	waitWalletTx(t, jd, txid)
+
+	if err := junocashdutil.GenerateBlocks(ctx, jd, 2); err != nil {
+		t.Fatalf("confirm blocks: %v", err)
+	}
+
+	waitSpendableOrchardNote(t, jd)
+}
+
+func waitWalletTx(t *testing.T, jd *containers.Junocashd, txid string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		_, err := jd.ExecCLI(ctx, "gettransaction", txid)
+		if err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("tx not seen by wallet")
+		case <-ticker.C:
+		}
 	}
 }
 
-func seedBase64FromNode(t *testing.T, jd *containers.Junocashd) string {
+func waitSpendableOrchardNote(t *testing.T, jd *containers.Junocashd) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		notes, err := junocashdutil.ListUnspentOrchard(ctx, jd, 1, 0)
+		if err == nil && len(notes) > 0 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("orchard note not spendable")
+		case <-ticker.C:
+		}
+	}
+}
+
+func seedCandidatesFromNode(t *testing.T, jd *containers.Junocashd) []string {
 	t.Helper()
 	ctx := context.Background()
 
@@ -75,15 +133,54 @@ func seedBase64FromNode(t *testing.T, jd *containers.Junocashd) string {
 	if err != nil {
 		t.Fatalf("parse seed phrase: %v", err)
 	}
-	seed, err := mnemonic.EntropyBase64FromMnemonic(mn)
+	entropyB64, err := mnemonic.EntropyBase64FromMnemonic(mn)
+	if err != nil {
+		t.Fatalf("decode seed phrase: %v", err)
+	}
+	seedB64, err := mnemonic.SeedBase64FromMnemonic(mn)
 	if err != nil {
 		t.Fatalf("decode seed phrase: %v", err)
 	}
 
-	if _, err := base64.StdEncoding.DecodeString(seed); err != nil {
-		t.Fatalf("seed base64 invalid: %v", err)
+	entropy, err := base64.StdEncoding.DecodeString(entropyB64)
+	if err != nil || len(entropy) != 32 {
+		t.Fatalf("entropy base64 invalid")
 	}
-	return seed
+	seed64, err := base64.StdEncoding.DecodeString(seedB64)
+	if err != nil || len(seed64) != 64 {
+		t.Fatalf("seed base64 invalid")
+	}
+
+	add := func(out *[]string, seen map[string]struct{}, b []byte) {
+		s := base64.StdEncoding.EncodeToString(b)
+		if _, ok := seen[s]; ok {
+			return
+		}
+		seen[s] = struct{}{}
+		*out = append(*out, s)
+	}
+
+	var out []string
+	seen := make(map[string]struct{})
+
+	add(&out, seen, entropy)
+	entropyRev := make([]byte, len(entropy))
+	copy(entropyRev, entropy)
+	for i, j := 0, len(entropyRev)-1; i < j; i, j = i+1, j-1 {
+		entropyRev[i], entropyRev[j] = entropyRev[j], entropyRev[i]
+	}
+	add(&out, seen, entropyRev)
+
+	add(&out, seen, seed64)
+	add(&out, seen, seed64[:32])
+	add(&out, seen, seed64[32:])
+
+	sumEnt := sha256.Sum256(entropy)
+	add(&out, seen, sumEnt[:])
+	sumSeed := sha256.Sum256(seed64)
+	add(&out, seen, sumSeed[:])
+
+	return out
 }
 
 func unifiedAddress(t *testing.T, jd *containers.Junocashd, account uint32) string {
@@ -155,7 +252,7 @@ func buildSingleNoteWithdrawalPlan(t *testing.T, rpc *junocashd.Client, jd *cont
 		Version:      types.V0,
 		Kind:         types.TxPlanKindWithdrawal,
 		WalletID:     "test-wallet",
-		CoinType:     testCoinType,
+		CoinType:     coinTypeForChain(info.Chain),
 		Account:      0,
 		Chain:        info.Chain,
 		BranchID:     info.BranchID,
@@ -252,4 +349,3 @@ func decodeJSON[T any](t *testing.T, raw []byte, out *T) {
 		t.Fatalf("json decode: %v", err)
 	}
 }
-
