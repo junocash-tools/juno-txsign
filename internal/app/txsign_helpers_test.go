@@ -121,6 +121,41 @@ func waitSpendableOrchardNote(t *testing.T, jd *containers.Junocashd) {
 	}
 }
 
+func waitSpendableOrchardNoteNot(t *testing.T, jd *containers.Junocashd, excludeNoteID string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	excludeNoteID = strings.TrimSpace(excludeNoteID)
+
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		notes, err := junocashdutil.ListUnspentOrchard(ctx, jd, 1, 0)
+		if err == nil && len(notes) > 0 {
+			var excludedPresent bool
+			var otherPresent bool
+			for _, n := range notes {
+				id := fmt.Sprintf("%s:%d", n.TxID, n.OutIndex)
+				if excludeNoteID != "" && strings.EqualFold(id, excludeNoteID) {
+					excludedPresent = true
+					continue
+				}
+				otherPresent = true
+			}
+			if !excludedPresent && otherPresent {
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("orchard note not spendable")
+		case <-ticker.C:
+		}
+	}
+}
+
 func seedCandidatesFromNode(t *testing.T, jd *containers.Junocashd) []string {
 	t.Helper()
 	ctx := context.Background()
@@ -195,6 +230,13 @@ func unifiedAddress(t *testing.T, jd *containers.Junocashd, account uint32) stri
 
 func buildSingleNoteWithdrawalPlan(t *testing.T, rpc *junocashd.Client, jd *containers.Junocashd, toAddr, changeAddr string, amountZat uint64) types.TxPlan {
 	t.Helper()
+	return buildSingleNoteSendPlan(t, rpc, jd, []types.TxOutput{
+		{ToAddress: toAddr, AmountZat: strconv.FormatUint(amountZat, 10)},
+	}, changeAddr, types.TxPlanKindWithdrawal)
+}
+
+func buildSingleNoteSendPlan(t *testing.T, rpc *junocashd.Client, jd *containers.Junocashd, outputs []types.TxOutput, changeAddr string, kind types.TxPlanKind) types.TxPlan {
+	t.Helper()
 	ctx := context.Background()
 
 	info, err := chain.GetChainInfo(ctx, rpc)
@@ -232,8 +274,23 @@ func buildSingleNoteWithdrawalPlan(t *testing.T, rpc *junocashd.Client, jd *cont
 	const expiryOffset = uint32(40)
 	expiryHeight := anchorHeight + expiryOffset
 
-	feeZat := uint64(5_000 * 2)
-	if n.AmountZat < amountZat+feeZat {
+	var totalOut uint64
+	for i, o := range outputs {
+		amt, err := strconv.ParseUint(strings.TrimSpace(o.AmountZat), 10, 64)
+		if err != nil || amt == 0 {
+			t.Fatalf("outputs[%d].amount_zat invalid", i)
+		}
+		totalOut += amt
+	}
+
+	// We choose amounts so that change > 0 and a change output will be created.
+	outputCount := len(outputs) + 1
+	actions := outputCount
+	if actions < 2 {
+		actions = 2
+	}
+	feeZat := uint64(5_000) * uint64(actions)
+	if n.AmountZat <= totalOut+feeZat {
 		t.Fatalf("insufficient note value")
 	}
 
@@ -249,8 +306,97 @@ func buildSingleNoteWithdrawalPlan(t *testing.T, rpc *junocashd.Client, jd *cont
 	}
 
 	plan := types.TxPlan{
+		Version:       types.V0,
+		Kind:          kind,
+		WalletID:      "test-wallet",
+		CoinType:      coinTypeForChain(info.Chain),
+		Account:       0,
+		Chain:         info.Chain,
+		BranchID:      info.BranchID,
+		AnchorHeight:  anchorHeight,
+		Anchor:        w.Root,
+		ExpiryHeight:  expiryHeight,
+		Outputs:       outputs,
+		ChangeAddress: changeAddr,
+		FeeZat:        strconv.FormatUint(feeZat, 10),
+		Notes: []types.OrchardSpendNote{
+			{
+				NoteID:          key,
+				ActionNullifier: act.Nullifier,
+				CMX:             act.CMX,
+				Position:        act.Position,
+				Path:            w.Paths[0].AuthPath,
+				EphemeralKey:    act.EphemeralKey,
+				EncCiphertext:   act.EncCiphertext,
+			},
+		},
+	}
+
+	if err := validatePlanBasics(plan); err != nil {
+		t.Fatalf("plan invalid: %v", err)
+	}
+	return plan
+}
+
+func buildSingleNoteSweepPlan(t *testing.T, rpc *junocashd.Client, jd *containers.Junocashd, toAddr, changeAddr string) types.TxPlan {
+	t.Helper()
+	ctx := context.Background()
+
+	info, err := chain.GetChainInfo(ctx, rpc)
+	if err != nil {
+		t.Fatalf("chain info: %v", err)
+	}
+	if info.Height < 0 || info.Height > int64(^uint32(0)) {
+		t.Fatalf("chain height invalid: %d", info.Height)
+	}
+	anchorHeight := uint32(info.Height)
+
+	orch, err := chain.BuildOrchardIndex(ctx, rpc, int64(anchorHeight))
+	if err != nil {
+		t.Fatalf("orchard index: %v", err)
+	}
+	if len(orch.CMXHex) == 0 {
+		t.Fatalf("orchard commitments empty")
+	}
+
+	notes, err := junocashdutil.ListUnspentOrchard(ctx, jd, 1, 0)
+	if err != nil {
+		t.Fatalf("z_listunspent: %v", err)
+	}
+	if len(notes) == 0 {
+		t.Fatalf("no spendable orchard notes")
+	}
+
+	n := notes[0]
+	key := fmt.Sprintf("%s:%d", n.TxID, n.OutIndex)
+	act, ok := orch.ByOutpoint[key]
+	if !ok {
+		t.Fatalf("missing orchard action for note %s", key)
+	}
+
+	const expiryOffset = uint32(40)
+	expiryHeight := anchorHeight + expiryOffset
+
+	const feeZat = uint64(5_000 * 2)
+	if n.AmountZat <= feeZat {
+		t.Fatalf("insufficient note value")
+	}
+	amountZat := n.AmountZat - feeZat
+
+	w, err := witness.OrchardWitness(orch.CMXHex, []uint32{act.Position})
+	if err != nil {
+		t.Fatalf("witness: %v", err)
+	}
+	if len(w.Paths) != 1 || w.Paths[0].Position != act.Position {
+		t.Fatalf("witness mismatch")
+	}
+	if len(w.Paths[0].AuthPath) != 32 {
+		t.Fatalf("witness path length mismatch")
+	}
+
+	plan := types.TxPlan{
 		Version:      types.V0,
-		Kind:         types.TxPlanKindWithdrawal,
+		Kind:         types.TxPlanKindSweep,
 		WalletID:     "test-wallet",
 		CoinType:     coinTypeForChain(info.Chain),
 		Account:      0,
@@ -311,14 +457,16 @@ func validatePlanBasics(plan types.TxPlan) error {
 	if plan.ExpiryHeight == 0 {
 		return errors.New("expiry_height")
 	}
-	if len(plan.Outputs) != 1 {
+	if len(plan.Outputs) == 0 {
 		return errors.New("outputs")
 	}
-	if strings.TrimSpace(plan.Outputs[0].ToAddress) == "" {
-		return errors.New("to_address")
-	}
-	if strings.TrimSpace(plan.Outputs[0].AmountZat) == "" {
-		return errors.New("amount_zat")
+	for _, o := range plan.Outputs {
+		if strings.TrimSpace(o.ToAddress) == "" {
+			return errors.New("to_address")
+		}
+		if strings.TrimSpace(o.AmountZat) == "" {
+			return errors.New("amount_zat")
+		}
 	}
 	if strings.TrimSpace(plan.ChangeAddress) == "" {
 		return errors.New("change_address")
@@ -326,11 +474,13 @@ func validatePlanBasics(plan types.TxPlan) error {
 	if strings.TrimSpace(plan.FeeZat) == "" {
 		return errors.New("fee_zat")
 	}
-	if len(plan.Notes) != 1 {
+	if len(plan.Notes) == 0 {
 		return errors.New("notes")
 	}
-	if len(plan.Notes[0].Path) != 32 {
-		return errors.New("witness_path")
+	for _, n := range plan.Notes {
+		if len(n.Path) != 32 {
+			return errors.New("witness_path")
+		}
 	}
 	return nil
 }
