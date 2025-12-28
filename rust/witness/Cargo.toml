@@ -1,0 +1,17 @@
+[package]
+name = "juno_tx_witness"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "juno_tx_witness"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+hex = "0.4.3"
+incrementalmerkletree = { version = "0.8.2", features = ["legacy-api"] }
+orchard = { version = "0.11.0" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"

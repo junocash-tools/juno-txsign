@@ -7,6 +7,7 @@ require (
 	github.com/docker/docker v28.5.1+incompatible
 	github.com/docker/go-connections v0.6.0
 	github.com/testcontainers/testcontainers-go v0.40.0
+	github.com/tyler-smith/go-bip39 v1.1.0
 )
 
 require (
