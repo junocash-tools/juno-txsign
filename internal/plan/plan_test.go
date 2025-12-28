@@ -15,11 +15,16 @@ func TestValidateTxPlanV0_RequiresVersionV0(t *testing.T) {
 }
 
 func TestBuildSendRequestJSON_ValidatesSeedBase64(t *testing.T) {
+	path := make([]string, 32)
+	for i := range path {
+		path[i] = strings.Repeat("f", 64)
+	}
+
 	txplan := types.TxPlan{
 		Version:      types.V0,
 		Kind:         types.TxPlanKindWithdrawal,
 		WalletID:     "hot",
-		CoinType:     1337,
+		CoinType:     8135,
 		Account:      0,
 		Chain:        "regtest",
 		BranchID:     0x4dec4df0,
@@ -36,7 +41,7 @@ func TestBuildSendRequestJSON_ValidatesSeedBase64(t *testing.T) {
 				ActionNullifier: strings.Repeat("b", 64),
 				CMX:             strings.Repeat("c", 64),
 				Position:        0,
-				Path:            make([]string, 32),
+				Path:            path,
 				EphemeralKey:    strings.Repeat("d", 64),
 				EncCiphertext:   strings.Repeat("e", 104),
 			},

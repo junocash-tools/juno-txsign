@@ -116,6 +116,25 @@ func ValidateTxPlanV0(txplan types.TxPlan) error {
 	if strings.TrimSpace(txplan.Chain) == "" {
 		return fmt.Errorf("%w: chain required", ErrInvalidPlan)
 	}
+	if txplan.CoinType == 0 {
+		return fmt.Errorf("%w: coin_type required", ErrInvalidPlan)
+	}
+	switch strings.ToLower(strings.TrimSpace(txplan.Chain)) {
+	case "main":
+		if txplan.CoinType != 8133 {
+			return fmt.Errorf("%w: coin_type must be 8133 on main", ErrInvalidPlan)
+		}
+	case "test", "testnet":
+		if txplan.CoinType != 8134 {
+			return fmt.Errorf("%w: coin_type must be 8134 on testnet", ErrInvalidPlan)
+		}
+	case "regtest":
+		if txplan.CoinType != 8135 {
+			return fmt.Errorf("%w: coin_type must be 8135 on regtest", ErrInvalidPlan)
+		}
+	default:
+		return fmt.Errorf("%w: unsupported chain %q", ErrInvalidPlan, txplan.Chain)
+	}
 	if txplan.BranchID == 0 {
 		return fmt.Errorf("%w: branch_id required", ErrInvalidPlan)
 	}
@@ -124,6 +143,9 @@ func ValidateTxPlanV0(txplan types.TxPlan) error {
 	}
 	if strings.TrimSpace(txplan.Anchor) == "" {
 		return fmt.Errorf("%w: anchor required", ErrInvalidPlan)
+	}
+	if len(strings.TrimSpace(txplan.Anchor)) != 64 {
+		return fmt.Errorf("%w: anchor must be 32-byte hex", ErrInvalidPlan)
 	}
 	if _, err := hex.DecodeString(strings.TrimSpace(txplan.Anchor)); err != nil {
 		return fmt.Errorf("%w: anchor must be hex", ErrInvalidPlan)
@@ -134,6 +156,22 @@ func ValidateTxPlanV0(txplan types.TxPlan) error {
 	if strings.TrimSpace(txplan.ChangeAddress) == "" {
 		return fmt.Errorf("%w: change_address required", ErrInvalidPlan)
 	}
+	for i, out := range txplan.Outputs {
+		memoHex := strings.TrimSpace(out.MemoHex)
+		if memoHex == "" {
+			continue
+		}
+		if len(memoHex)%2 != 0 {
+			return fmt.Errorf("%w: outputs[%d].memo_hex must be even-length hex", ErrInvalidPlan, i)
+		}
+		b, err := hex.DecodeString(memoHex)
+		if err != nil {
+			return fmt.Errorf("%w: outputs[%d].memo_hex must be hex", ErrInvalidPlan, i)
+		}
+		if len(b) > 512 {
+			return fmt.Errorf("%w: outputs[%d].memo_hex must be <=512 bytes", ErrInvalidPlan, i)
+		}
+	}
 	if len(txplan.Notes) == 0 {
 		return fmt.Errorf("%w: notes required", ErrInvalidPlan)
 	}
@@ -141,17 +179,49 @@ func ValidateTxPlanV0(txplan types.TxPlan) error {
 		if strings.TrimSpace(n.ActionNullifier) == "" {
 			return fmt.Errorf("%w: notes[%d].action_nullifier required", ErrInvalidPlan, i)
 		}
+		if len(strings.TrimSpace(n.ActionNullifier)) != 64 {
+			return fmt.Errorf("%w: notes[%d].action_nullifier must be 32-byte hex", ErrInvalidPlan, i)
+		}
+		if _, err := hex.DecodeString(strings.TrimSpace(n.ActionNullifier)); err != nil {
+			return fmt.Errorf("%w: notes[%d].action_nullifier must be hex", ErrInvalidPlan, i)
+		}
 		if strings.TrimSpace(n.CMX) == "" {
 			return fmt.Errorf("%w: notes[%d].cmx required", ErrInvalidPlan, i)
+		}
+		if len(strings.TrimSpace(n.CMX)) != 64 {
+			return fmt.Errorf("%w: notes[%d].cmx must be 32-byte hex", ErrInvalidPlan, i)
+		}
+		if _, err := hex.DecodeString(strings.TrimSpace(n.CMX)); err != nil {
+			return fmt.Errorf("%w: notes[%d].cmx must be hex", ErrInvalidPlan, i)
 		}
 		if len(n.Path) != 32 {
 			return fmt.Errorf("%w: notes[%d].path must have 32 elements", ErrInvalidPlan, i)
 		}
+		for j, p := range n.Path {
+			if len(strings.TrimSpace(p)) != 64 {
+				return fmt.Errorf("%w: notes[%d].path[%d] must be 32-byte hex", ErrInvalidPlan, i, j)
+			}
+			if _, err := hex.DecodeString(strings.TrimSpace(p)); err != nil {
+				return fmt.Errorf("%w: notes[%d].path[%d] must be hex", ErrInvalidPlan, i, j)
+			}
+		}
 		if strings.TrimSpace(n.EphemeralKey) == "" {
 			return fmt.Errorf("%w: notes[%d].ephemeral_key required", ErrInvalidPlan, i)
 		}
+		if len(strings.TrimSpace(n.EphemeralKey)) != 64 {
+			return fmt.Errorf("%w: notes[%d].ephemeral_key must be 32-byte hex", ErrInvalidPlan, i)
+		}
+		if _, err := hex.DecodeString(strings.TrimSpace(n.EphemeralKey)); err != nil {
+			return fmt.Errorf("%w: notes[%d].ephemeral_key must be hex", ErrInvalidPlan, i)
+		}
 		if strings.TrimSpace(n.EncCiphertext) == "" {
 			return fmt.Errorf("%w: notes[%d].enc_ciphertext required", ErrInvalidPlan, i)
+		}
+		if len(strings.TrimSpace(n.EncCiphertext)) != 104 {
+			return fmt.Errorf("%w: notes[%d].enc_ciphertext must be 52-byte hex", ErrInvalidPlan, i)
+		}
+		if _, err := hex.DecodeString(strings.TrimSpace(n.EncCiphertext)); err != nil {
+			return fmt.Errorf("%w: notes[%d].enc_ciphertext must be hex", ErrInvalidPlan, i)
 		}
 	}
 	return nil
