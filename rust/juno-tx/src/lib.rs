@@ -70,6 +70,8 @@ enum TxBuildError {
     AnchorInvalid,
     #[error("address_invalid")]
     AddressInvalid,
+    #[error("outputs_invalid")]
+    OutputsInvalid,
     #[error("amount_invalid")]
     AmountInvalid,
     #[error("fee_invalid")]
@@ -118,6 +120,13 @@ struct OrchardSpendNote {
 }
 
 #[derive(Debug, Deserialize)]
+struct OrchardOutput {
+    to_address: String,
+    amount_zat: String,
+    memo_hex: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct TransparentUTXO {
     address: String,
     txid: String,
@@ -136,11 +145,8 @@ enum TxRequest {
         branch_id: u32,
         expiry_height: u32,
         anchor: String,
-        to: String,
-        amount_zat: String,
+        outputs: Vec<OrchardOutput>,
         fee_zat: String,
-        memo: Option<String>,
-        memo_hex: Option<String>,
         change_address: String,
         notes: Vec<OrchardSpendNote>,
     },
@@ -212,25 +218,6 @@ fn empty_memo() -> [u8; 512] {
     let mut out = [0u8; 512];
     out[0] = 0xF6;
     out
-}
-
-fn memo_bytes(memo: Option<&str>) -> Result<[u8; 512], TxBuildError> {
-    let Some(m) = memo else {
-        return Ok(empty_memo());
-    };
-    let trimmed = m.trim();
-    if trimmed.is_empty() {
-        return Ok(empty_memo());
-    }
-
-    let bytes = trimmed.as_bytes();
-    if bytes.len() > 512 {
-        return Err(TxBuildError::AmountInvalid);
-    }
-
-    let mut out = [0u8; 512];
-    out[..bytes.len()].copy_from_slice(bytes);
-    Ok(out)
 }
 
 fn memo_bytes_hex(memo_hex: Option<&str>) -> Result<[u8; 512], TxBuildError> {
@@ -413,8 +400,8 @@ fn parse_transparent_script(hex_str: &str) -> Result<TransparentScript, TxBuildE
     Ok(TransparentScript(script::Code(bytes)))
 }
 
-fn required_fee_send(spend_count: usize) -> Result<Zatoshis, TxBuildError> {
-    let actions = core::cmp::max(2usize, spend_count);
+fn required_fee_send(spend_count: usize, output_count: usize) -> Result<Zatoshis, TxBuildError> {
+    let actions = core::cmp::max(2usize, core::cmp::max(spend_count, output_count));
     let fee = 5_000u64
         .checked_mul(actions as u64)
         .ok_or(TxBuildError::FeeInvalid)?;
@@ -444,11 +431,8 @@ fn build_send(req: &TxRequest) -> Result<(String, String, String), TxBuildError>
         branch_id,
         expiry_height,
         anchor,
-        to,
-        amount_zat,
+        outputs,
         fee_zat,
-        memo,
-        memo_hex,
         change_address,
         notes,
     } = req
@@ -471,17 +455,14 @@ fn build_send(req: &TxRequest) -> Result<(String, String, String), TxBuildError>
         return Err(TxBuildError::ExpiryHeightInvalid);
     }
 
-    let amount = parse_u64_decimal(amount_zat)?;
     let fee_u64 = parse_u64_decimal(fee_zat)?;
     let fee = Zatoshis::from_u64(fee_u64).map_err(|_| TxBuildError::FeeInvalid)?;
 
+    if outputs.is_empty() || outputs.len() > 200 {
+        return Err(TxBuildError::OutputsInvalid);
+    }
     if notes.is_empty() || notes.len() > 200 {
         return Err(TxBuildError::NotesInvalid);
-    }
-
-    let required_fee = required_fee_send(notes.len())?;
-    if fee != required_fee {
-        return Err(TxBuildError::FeeInvalid);
     }
 
     let mut seed = decode_seed(seed_base64)?;
@@ -501,13 +482,21 @@ fn build_send(req: &TxRequest) -> Result<(String, String, String), TxBuildError>
         }
         let anchor = anchor_ct.unwrap();
 
-        let to_addr = decode_orchard_address(to)?;
         let change_addr = decode_orchard_address(change_address)?;
-        let memo_bytes = if memo_hex.is_some() {
-            memo_bytes_hex(memo_hex.as_deref())?
-        } else {
-            memo_bytes(memo.as_deref())?
-        };
+        let mut outputs_parsed = Vec::with_capacity(outputs.len());
+        let mut total_out: u64 = 0;
+        for o in outputs {
+            let to_addr = decode_orchard_address(&o.to_address)?;
+            let amount = parse_u64_decimal(&o.amount_zat)?;
+            if amount == 0 {
+                return Err(TxBuildError::AmountInvalid);
+            }
+            total_out = total_out
+                .checked_add(amount)
+                .ok_or(TxBuildError::AmountInvalid)?;
+            let memo_bytes = memo_bytes_hex(o.memo_hex.as_deref())?;
+            outputs_parsed.push((to_addr, amount, memo_bytes));
+        }
 
         let mut orchard_builder =
             orchard::builder::Builder::new(orchard::builder::BundleType::DEFAULT, anchor);
@@ -568,7 +557,7 @@ fn build_send(req: &TxRequest) -> Result<(String, String, String), TxBuildError>
                 .map_err(|_| TxBuildError::WitnessInvalid)?;
         }
 
-        let needed = amount
+        let needed = total_out
             .checked_add(fee_u64)
             .ok_or(TxBuildError::InsufficientFunds)?;
         if total_in < needed {
@@ -576,14 +565,22 @@ fn build_send(req: &TxRequest) -> Result<(String, String, String), TxBuildError>
         }
         let change = total_in - needed;
 
-        orchard_builder
-            .add_output(
-                Some(fvk.to_ovk(Scope::External)),
-                to_addr,
-                orchard::value::NoteValue::from_raw(amount),
-                memo_bytes,
-            )
-            .map_err(|_| TxBuildError::TxBuildFailed)?;
+        let output_count = outputs_parsed.len() + if change > 0 { 1 } else { 0 };
+        let required_fee = required_fee_send(notes.len(), output_count)?;
+        if fee != required_fee {
+            return Err(TxBuildError::FeeInvalid);
+        }
+
+        for (to_addr, amount, memo_bytes) in outputs_parsed {
+            orchard_builder
+                .add_output(
+                    Some(fvk.to_ovk(Scope::External)),
+                    to_addr,
+                    orchard::value::NoteValue::from_raw(amount),
+                    memo_bytes,
+                )
+                .map_err(|_| TxBuildError::TxBuildFailed)?;
+        }
 
         if change > 0 {
             orchard_builder

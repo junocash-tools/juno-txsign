@@ -23,10 +23,8 @@ type SendRequest struct {
 	BranchID      uint32 `json:"branch_id"`
 	ExpiryHeight  uint32 `json:"expiry_height"`
 	Anchor        string `json:"anchor"`
-	To            string `json:"to"`
-	AmountZat     string `json:"amount_zat"`
+	Outputs       []types.TxOutput `json:"outputs"`
 	FeeZat        string `json:"fee_zat"`
-	MemoHex       string `json:"memo_hex,omitempty"`
 	ChangeAddress string `json:"change_address"`
 	Notes         []Note `json:"notes"`
 }
@@ -53,15 +51,19 @@ func BuildSendRequestJSON(txplan types.TxPlan, seedBase64 string) (string, error
 		return "", fmt.Errorf("%w: seed_base64 invalid", ErrInvalidPlan)
 	}
 
-	if len(txplan.Outputs) != 1 {
-		return "", fmt.Errorf("%w: outputs must contain exactly 1 output", ErrInvalidPlan)
+	if len(txplan.Outputs) == 0 {
+		return "", fmt.Errorf("%w: outputs required", ErrInvalidPlan)
 	}
-	out := txplan.Outputs[0]
-	if strings.TrimSpace(out.ToAddress) == "" {
-		return "", fmt.Errorf("%w: outputs[0].to_address required", ErrInvalidPlan)
+	if len(txplan.Outputs) > 200 {
+		return "", fmt.Errorf("%w: outputs too large", ErrInvalidPlan)
 	}
-	if strings.TrimSpace(out.AmountZat) == "" {
-		return "", fmt.Errorf("%w: outputs[0].amount_zat required", ErrInvalidPlan)
+	for i, out := range txplan.Outputs {
+		if strings.TrimSpace(out.ToAddress) == "" {
+			return "", fmt.Errorf("%w: outputs[%d].to_address required", ErrInvalidPlan, i)
+		}
+		if strings.TrimSpace(out.AmountZat) == "" {
+			return "", fmt.Errorf("%w: outputs[%d].amount_zat required", ErrInvalidPlan, i)
+		}
 	}
 
 	if strings.TrimSpace(txplan.FeeZat) == "" {
@@ -76,10 +78,8 @@ func BuildSendRequestJSON(txplan types.TxPlan, seedBase64 string) (string, error
 		BranchID:      txplan.BranchID,
 		ExpiryHeight:  txplan.ExpiryHeight,
 		Anchor:        txplan.Anchor,
-		To:            out.ToAddress,
-		AmountZat:     out.AmountZat,
 		FeeZat:        txplan.FeeZat,
-		MemoHex:       strings.TrimSpace(out.MemoHex),
+		Outputs:       txplan.Outputs,
 		ChangeAddress: txplan.ChangeAddress,
 		Notes:         make([]Note, 0, len(txplan.Notes)),
 	}
@@ -107,8 +107,10 @@ func ValidateTxPlanV0(txplan types.TxPlan) error {
 	if txplan.Version != types.V0 {
 		return fmt.Errorf("%w: unsupported version %q", ErrInvalidPlan, txplan.Version)
 	}
-	if strings.TrimSpace(string(txplan.Kind)) == "" {
-		return fmt.Errorf("%w: kind required", ErrInvalidPlan)
+	switch txplan.Kind {
+	case types.TxPlanKindWithdrawal, types.TxPlanKindSweep, types.TxPlanKindRebalance:
+	default:
+		return fmt.Errorf("%w: unsupported kind %q", ErrInvalidPlan, txplan.Kind)
 	}
 	if strings.TrimSpace(txplan.WalletID) == "" {
 		return fmt.Errorf("%w: wallet_id required", ErrInvalidPlan)
@@ -156,7 +158,19 @@ func ValidateTxPlanV0(txplan types.TxPlan) error {
 	if strings.TrimSpace(txplan.ChangeAddress) == "" {
 		return fmt.Errorf("%w: change_address required", ErrInvalidPlan)
 	}
+	if len(txplan.Outputs) == 0 {
+		return fmt.Errorf("%w: outputs required", ErrInvalidPlan)
+	}
+	if len(txplan.Outputs) > 200 {
+		return fmt.Errorf("%w: outputs too large", ErrInvalidPlan)
+	}
 	for i, out := range txplan.Outputs {
+		if strings.TrimSpace(out.ToAddress) == "" {
+			return fmt.Errorf("%w: outputs[%d].to_address required", ErrInvalidPlan, i)
+		}
+		if strings.TrimSpace(out.AmountZat) == "" {
+			return fmt.Errorf("%w: outputs[%d].amount_zat required", ErrInvalidPlan, i)
+		}
 		memoHex := strings.TrimSpace(out.MemoHex)
 		if memoHex == "" {
 			continue
