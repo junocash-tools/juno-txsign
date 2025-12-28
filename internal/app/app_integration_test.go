@@ -9,4 +9,3 @@ func TestIntegration_Smoke(t *testing.T) {
 		t.Fatalf("Name is empty")
 	}
 }
-

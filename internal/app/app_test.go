@@ -7,4 +7,3 @@ func TestName_NotEmpty(t *testing.T) {
 		t.Fatalf("Name is empty")
 	}
 }
-

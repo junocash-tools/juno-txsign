@@ -1,0 +1,183 @@
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/Abdullah1738/juno-sdk-go/types"
+	"github.com/Abdullah1738/juno-txsign/pkg/txsign"
+)
+
+func Run(args []string) int {
+	return RunWithIO(args, os.Stdout, os.Stderr)
+}
+
+func RunWithIO(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		writeUsage(stdout)
+		return 2
+	}
+
+	switch args[0] {
+	case "-h", "--help", "help":
+		writeUsage(stdout)
+		return 0
+	case "sign":
+		return runSign(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "unknown command: %s\n\n", args[0])
+		writeUsage(stderr)
+		return 2
+	}
+}
+
+func writeUsage(w io.Writer) {
+	fmt.Fprintln(w, "juno-txsign")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Offline signer for TxPlan v0 packages.")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  juno-txsign sign --txplan <path|-> --seed-base64 <b64> [--out <path>] [--json]")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Notes:")
+	fmt.Fprintln(w, "  - This command performs no network calls.")
+	fmt.Fprintln(w, "  - Do not log or store seeds/spending keys.")
+}
+
+func runSign(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sign", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	var txplanPath string
+	var seedBase64 string
+	var seedFile string
+	var outPath string
+	var jsonOut bool
+
+	fs.StringVar(&txplanPath, "txplan", "", "path to TxPlan JSON (or - for stdin)")
+	fs.StringVar(&seedBase64, "seed-base64", "", "seed in base64")
+	fs.StringVar(&seedFile, "seed-file", "", "path to file containing base64 seed")
+	fs.StringVar(&outPath, "out", "", "optional path to write raw tx hex")
+	fs.BoolVar(&jsonOut, "json", false, "JSON output")
+
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+
+	txplanPath = strings.TrimSpace(txplanPath)
+	if txplanPath == "" {
+		return writeErr(stdout, stderr, jsonOut, "invalid_request", "txplan is required")
+	}
+
+	seedBase64, err := loadSeed(seedBase64, seedFile)
+	if err != nil {
+		return writeErr(stdout, stderr, jsonOut, "invalid_request", err.Error())
+	}
+
+	plan, err := loadTxPlan(txplanPath)
+	if err != nil {
+		return writeErr(stdout, stderr, jsonOut, "invalid_request", err.Error())
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	res, err := txsign.Sign(ctx, plan, seedBase64)
+	if err != nil {
+		return writeErr(stdout, stderr, jsonOut, "sign_failed", err.Error())
+	}
+
+	if outPath != "" {
+		if err := os.WriteFile(outPath, []byte(res.RawTxHex+"\n"), 0o600); err != nil {
+			return writeErr(stdout, stderr, jsonOut, "io_error", err.Error())
+		}
+	}
+
+	if jsonOut {
+		_ = json.NewEncoder(stdout).Encode(map[string]any{
+			"status": "ok",
+			"data": map[string]any{
+				"txid":       res.TxID,
+				"raw_tx_hex": res.RawTxHex,
+				"fee_zat":    res.FeeZat,
+			},
+		})
+		return 0
+	}
+
+	fmt.Fprintln(stdout, res.RawTxHex)
+	return 0
+}
+
+func loadSeed(seedBase64, seedFile string) (string, error) {
+	var sources int
+	if strings.TrimSpace(seedBase64) != "" {
+		sources++
+	}
+	if strings.TrimSpace(seedFile) != "" {
+		sources++
+	}
+	if sources == 0 {
+		return "", errors.New("seed-base64 is required (or use --seed-file)")
+	}
+	if sources > 1 {
+		return "", errors.New("input source conflict (use only one of --seed-base64, --seed-file)")
+	}
+	if strings.TrimSpace(seedBase64) != "" {
+		return strings.TrimSpace(seedBase64), nil
+	}
+
+	b, err := os.ReadFile(strings.TrimSpace(seedFile))
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", filepath.Base(seedFile), err)
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+func loadTxPlan(path string) (types.TxPlan, error) {
+	var r io.Reader
+	if path == "-" {
+		r = os.Stdin
+	} else {
+		f, err := os.Open(path)
+		if err != nil {
+			return types.TxPlan{}, fmt.Errorf("open txplan: %w", err)
+		}
+		defer f.Close()
+		r = f
+	}
+
+	var plan types.TxPlan
+	dec := json.NewDecoder(r)
+	if err := dec.Decode(&plan); err != nil {
+		return types.TxPlan{}, errors.New("invalid txplan json")
+	}
+	return plan, nil
+}
+
+func writeErr(stdout, stderr io.Writer, jsonOut bool, code, msg string) int {
+	if jsonOut {
+		_ = json.NewEncoder(stdout).Encode(map[string]any{
+			"status": "err",
+			"error": map[string]any{
+				"code":    code,
+				"message": msg,
+			},
+		})
+		return 1
+	}
+	if msg == "" {
+		msg = code
+	}
+	fmt.Fprintln(stderr, msg)
+	return 1
+}

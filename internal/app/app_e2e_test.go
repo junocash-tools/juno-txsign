@@ -9,4 +9,3 @@ func TestE2E_Smoke(t *testing.T) {
 		t.Fatalf("Name is empty")
 	}
 }
-

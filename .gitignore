@@ -2,7 +2,8 @@
 /AGENTS.md
 /tmp/
 /tmp-*/
+/bin/
+/rust/**/target/
 
 # OS
 .DS_Store
-
