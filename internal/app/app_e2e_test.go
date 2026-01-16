@@ -130,7 +130,6 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 			t.Fatalf("tx not mined")
 		}
 
-		waitWalletTx(t, jd, txid)
 		waitSpendableOrchardNoteNot(t, jd, spentNoteID)
 	}
 

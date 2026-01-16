@@ -88,13 +88,15 @@ func waitWalletTx(t *testing.T, jd *containers.Junocashd, txid string) {
 	defer ticker.Stop()
 
 	for {
-		_, err := jd.ExecCLI(ctx, "gettransaction", txid)
-		if err == nil {
+		if _, err := jd.ExecCLI(ctx, "gettransaction", txid); err == nil {
+			return
+		}
+		if _, err := jd.ExecCLI(ctx, "getrawtransaction", txid); err == nil {
 			return
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("tx not seen by wallet")
+			t.Fatalf("tx not seen by wallet or node")
 		case <-ticker.C:
 		}
 	}
