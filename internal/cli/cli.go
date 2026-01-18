@@ -16,6 +16,8 @@ import (
 	"github.com/Abdullah1738/juno-txsign/pkg/txsign"
 )
 
+const jsonVersionV1 = "v1"
+
 func Run(args []string) int {
 	return RunWithIO(args, os.Stdout, os.Stderr)
 }
@@ -104,7 +106,8 @@ func runSign(args []string, stdout, stderr io.Writer) int {
 
 	if jsonOut {
 		_ = json.NewEncoder(stdout).Encode(map[string]any{
-			"status": "ok",
+			"version": jsonVersionV1,
+			"status":  "ok",
 			"data": map[string]any{
 				"txid":       res.TxID,
 				"raw_tx_hex": res.RawTxHex,
@@ -167,7 +170,8 @@ func loadTxPlan(path string) (types.TxPlan, error) {
 func writeErr(stdout, stderr io.Writer, jsonOut bool, code, msg string) int {
 	if jsonOut {
 		_ = json.NewEncoder(stdout).Encode(map[string]any{
-			"status": "err",
+			"version": jsonVersionV1,
+			"status":  "err",
 			"error": map[string]any{
 				"code":    code,
 				"message": msg,

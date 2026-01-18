@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TxPlan v0",
+  "type": "object",
+  "required": [
+    "version",
+    "kind",
+    "wallet_id",
+    "coin_type",
+    "account",
+    "chain",
+    "branch_id",
+    "anchor_height",
+    "anchor",
+    "expiry_height",
+    "outputs",
+    "change_address",
+    "fee_zat",
+    "notes"
+  ],
+  "properties": {
+    "version": {
+      "const": "v0",
+      "description": "TxPlan format version"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["withdrawal", "sweep", "rebalance"]
+    },
+    "wallet_id": {
+      "type": "string",
+      "description": "Scanner wallet identifier used for note selection"
+    },
+    "coin_type": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "account": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "chain": {
+      "type": "string",
+      "description": "Chain identifier (e.g. mainnet/regtest)"
+    },
+    "branch_id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "anchor_height": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "anchor": {
+      "type": "string",
+      "description": "Orchard anchor (hex)"
+    },
+    "expiry_height": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "outputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/TxOutput"
+      }
+    },
+    "change_address": {
+      "type": "string",
+      "description": "Unified address receiving change (j1...)"
+    },
+    "fee_zat": {
+      "type": "string",
+      "pattern": "^[0-9]+$",
+      "description": "Decimal zatoshis (uint64 encoded as string)"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/OrchardSpendNote"
+      }
+    },
+    "metadata": {
+      "description": "Optional caller-provided metadata, echoed into the plan",
+      "type": ["object", "array", "string", "number", "integer", "boolean", "null"]
+    }
+  },
+  "$defs": {
+    "TxOutput": {
+      "type": "object",
+      "required": ["to_address", "amount_zat"],
+      "properties": {
+        "to_address": {
+          "type": "string"
+        },
+        "amount_zat": {
+          "type": "string",
+          "pattern": "^[0-9]+$"
+        },
+        "memo_hex": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "OrchardSpendNote": {
+      "type": "object",
+      "required": [
+        "action_nullifier",
+        "cmx",
+        "position",
+        "path",
+        "ephemeral_key",
+        "enc_ciphertext"
+      ],
+      "properties": {
+        "note_id": {
+          "type": "string",
+          "description": "Optional internal note identifier (for debugging/traceability)"
+        },
+        "action_nullifier": {
+          "type": "string",
+          "description": "Orchard action nullifier (hex)"
+        },
+        "cmx": {
+          "type": "string",
+          "description": "Orchard note commitment (cmx) (hex)"
+        },
+        "position": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Commitment tree position"
+        },
+        "path": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Merkle auth path (implementation-defined encoding)"
+        },
+        "ephemeral_key": {
+          "type": "string",
+          "description": "Ephemeral key bytes (hex)"
+        },
+        "enc_ciphertext": {
+          "type": "string",
+          "description": "Orchard encrypted note ciphertext (hex)"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
