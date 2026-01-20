@@ -23,7 +23,7 @@ jobs:
           set -euo pipefail
           tag="${{ github.ref_name }}"
 
-          if gh release view "$tag" >/dev/null 2>&1; then
+          if gh -R "${{ github.repository }}" release view "$tag" >/dev/null 2>&1; then
             exit 0
           fi
 
@@ -32,7 +32,7 @@ jobs:
             notes="Initial Version"
           fi
 
-          gh release create "$tag" --notes "$notes"
+          gh -R "${{ github.repository }}" release create "$tag" --notes "$notes"
 
   build:
     needs: create-release
@@ -154,4 +154,4 @@ jobs:
           set -euxo pipefail
           tag="${{ github.ref_name }}"
           archive="${BIN_NAME}_${tag}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
-          gh release upload "$tag" "dist/${archive}" "dist/${archive}.sha256" --clobber
+          gh -R "${{ github.repository }}" release upload "$tag" "dist/${archive}" "dist/${archive}.sha256" --clobber
