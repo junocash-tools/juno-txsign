@@ -28,6 +28,23 @@ Machine-readable output:
 
 Run `juno-txsign --help` for the complete flag reference.
 
+## Build
+
+- `make build` (outputs `bin/juno-txsign`)
+
+## Dynamic library path (Linux)
+
+`juno-txsign` uses CGO and links against Rust shared libraries built under:
+
+- `rust/juno-tx/target/release`
+- `rust/witness/target/release`
+
+If you see an error like `libjuno_tx.so: cannot open shared object file`, export `LD_LIBRARY_PATH`:
+
+```sh
+export LD_LIBRARY_PATH="$PWD/rust/juno-tx/target/release:$PWD/rust/witness/target/release${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+```
+
 ## Output formats
 
 - Default stdout: raw transaction hex (one line)
