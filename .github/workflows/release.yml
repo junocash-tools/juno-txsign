@@ -131,6 +131,7 @@ jobs:
           if [ "$GOOS" = "linux" ]; then
             export CC="zig cc -target ${{ matrix.zig_target }}"
             export CXX="zig c++ -target ${{ matrix.zig_target }}"
+            export CGO_LDFLAGS="${CGO_LDFLAGS:-} -lunwind"
             go build -trimpath -ldflags "-s -w -linkmode external -extldflags '-static'" -o "dist/${BIN_NAME}" "${GO_MAIN}"
             file "dist/${BIN_NAME}" | grep -q "statically linked"
           elif [ "$GOOS" = "darwin" ]; then
