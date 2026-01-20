@@ -1,0 +1,157 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  BIN_NAME: juno-txsign
+  GO_MAIN: ./cmd/juno-txsign
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub release (if needed)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          notes="Release $tag"
+          if [ "$tag" = "v1.0" ]; then
+            notes="Initial Version"
+          fi
+
+          gh release create "$tag" --notes "$notes"
+
+  build:
+    needs: create-release
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            runs-on: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            rust_target: x86_64-unknown-linux-musl
+            zig_target: x86_64-linux-musl
+          - name: linux-arm64
+            runs-on: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            rust_target: aarch64-unknown-linux-musl
+            zig_target: aarch64-linux-musl
+          - name: darwin-amd64
+            runs-on: macos-13
+            goos: darwin
+            goarch: amd64
+            rust_target: ""
+            zig_target: ""
+          - name: darwin-arm64
+            runs-on: macos-14
+            goos: darwin
+            goarch: arm64
+            rust_target: ""
+            zig_target: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Rust target
+        if: matrix.rust_target != ''
+        run: rustup target add ${{ matrix.rust_target }}
+
+      - uses: goto-bus-stop/setup-zig@v2
+        if: matrix.zig_target != ''
+        with:
+          version: 0.12.0
+
+      - uses: taiki-e/install-action@v2
+        if: matrix.zig_target != ''
+        with:
+          tool: cargo-zigbuild
+
+      - name: Build Rust static libraries
+        shell: bash
+        run: |
+          set -euxo pipefail
+          crates=(
+            "rust/juno-tx|juno_tx"
+            "rust/witness|juno_tx_witness"
+          )
+
+          for entry in "${crates[@]}"; do
+            IFS="|" read -r crate_dir lib <<< "$entry"
+            manifest="$crate_dir/Cargo.toml"
+
+            if [ -n "${{ matrix.rust_target }}" ]; then
+              cargo zigbuild --release --target "${{ matrix.rust_target }}" --manifest-path "$manifest"
+              mkdir -p "$crate_dir/target/release"
+              cp "$crate_dir/target/${{ matrix.rust_target }}/release/lib${lib}.a" "$crate_dir/target/release/lib${lib}.a"
+            else
+              cargo build --release --manifest-path "$manifest"
+            fi
+
+            rm -f "$crate_dir/target/release/lib${lib}.so" "$crate_dir/target/release/lib${lib}.dylib"
+          done
+
+      - name: Build binary
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p dist
+
+          export GOOS="${{ matrix.goos }}"
+          export GOARCH="${{ matrix.goarch }}"
+          export CGO_ENABLED=1
+
+          if [ "$GOOS" = "linux" ]; then
+            export CC="zig cc -target ${{ matrix.zig_target }}"
+            export CXX="zig c++ -target ${{ matrix.zig_target }}"
+            go build -trimpath -ldflags "-s -w -linkmode external -extldflags '-static'" -o "dist/${BIN_NAME}" "${GO_MAIN}"
+            file "dist/${BIN_NAME}" | grep -q "statically linked"
+          else
+            go build -trimpath -ldflags "-s -w" -o "dist/${BIN_NAME}" "${GO_MAIN}"
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euxo pipefail
+          tag="${{ github.ref_name }}"
+          archive="${BIN_NAME}_${tag}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
+
+          tar -C dist -czf "dist/${archive}" "${BIN_NAME}"
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "dist/${archive}" > "dist/${archive}.sha256"
+          else
+            shasum -a 256 "dist/${archive}" > "dist/${archive}.sha256"
+          fi
+
+      - name: Upload to GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          tag="${{ github.ref_name }}"
+          archive="${BIN_NAME}_${tag}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
+          gh release upload "$tag" "dist/${archive}" "dist/${archive}.sha256" --clobber
