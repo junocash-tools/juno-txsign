@@ -54,10 +54,10 @@ jobs:
             rust_target: aarch64-unknown-linux-musl
             zig_target: aarch64-linux-musl
           - name: darwin-amd64
-            runs-on: macos-13
+            runs-on: macos-14
             goos: darwin
             goarch: amd64
-            rust_target: ""
+            rust_target: x86_64-apple-darwin
             zig_target: ""
           - name: darwin-arm64
             runs-on: macos-14
@@ -101,11 +101,17 @@ jobs:
             IFS="|" read -r crate_dir lib <<< "$entry"
             manifest="$crate_dir/Cargo.toml"
 
-            if [ -n "${{ matrix.rust_target }}" ]; then
+            if [ "${{ matrix.goos }}" = "linux" ]; then
               cargo zigbuild --release --target "${{ matrix.rust_target }}" --manifest-path "$manifest"
               mkdir -p "$crate_dir/target/release"
               cp "$crate_dir/target/${{ matrix.rust_target }}/release/lib${lib}.a" "$crate_dir/target/release/lib${lib}.a"
+            elif [ -n "${{ matrix.rust_target }}" ]; then
+              export MACOSX_DEPLOYMENT_TARGET=11.0
+              cargo build --release --target "${{ matrix.rust_target }}" --manifest-path "$manifest"
+              mkdir -p "$crate_dir/target/release"
+              cp "$crate_dir/target/${{ matrix.rust_target }}/release/lib${lib}.a" "$crate_dir/target/release/lib${lib}.a"
             else
+              export MACOSX_DEPLOYMENT_TARGET=11.0
               cargo build --release --manifest-path "$manifest"
             fi
 
@@ -127,6 +133,13 @@ jobs:
             export CXX="zig c++ -target ${{ matrix.zig_target }}"
             go build -trimpath -ldflags "-s -w -linkmode external -extldflags '-static'" -o "dist/${BIN_NAME}" "${GO_MAIN}"
             file "dist/${BIN_NAME}" | grep -q "statically linked"
+          elif [ "$GOOS" = "darwin" ]; then
+            export MACOSX_DEPLOYMENT_TARGET=11.0
+            if [ "$GOARCH" = "amd64" ]; then
+              export CC="clang -target x86_64-apple-darwin"
+              export CXX="clang++ -target x86_64-apple-darwin"
+            fi
+            go build -trimpath -ldflags "-s -w" -o "dist/${BIN_NAME}" "${GO_MAIN}"
           else
             go build -trimpath -ldflags "-s -w" -o "dist/${BIN_NAME}" "${GO_MAIN}"
           fi
