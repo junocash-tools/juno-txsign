@@ -266,13 +266,6 @@ func buildSingleNoteSendPlan(t *testing.T, rpc *junocashd.Client, jd *containers
 		t.Fatalf("no spendable orchard notes")
 	}
 
-	n := notes[0]
-	key := fmt.Sprintf("%s:%d", n.TxID, n.OutIndex)
-	act, ok := orch.ByOutpoint[key]
-	if !ok {
-		t.Fatalf("missing orchard action for note %s", key)
-	}
-
 	const expiryOffset = uint32(40)
 	expiryHeight := anchorHeight + expiryOffset
 
@@ -285,15 +278,56 @@ func buildSingleNoteSendPlan(t *testing.T, rpc *junocashd.Client, jd *containers
 		totalOut += amt
 	}
 
-	// We choose amounts so that change > 0 and a change output will be created.
-	outputCount := len(outputs) + 1
-	actions := outputCount
-	if actions < 2 {
-		actions = 2
+	pickNote := func(need uint64, strict bool) (junocashdutil.UnspentOrchardNote, bool) {
+		var best junocashdutil.UnspentOrchardNote
+		var ok bool
+		for _, note := range notes {
+			if strict {
+				if note.AmountZat <= need {
+					continue
+				}
+			} else {
+				if note.AmountZat < need {
+					continue
+				}
+			}
+			if !ok || note.AmountZat > best.AmountZat {
+				best = note
+				ok = true
+			}
+		}
+		return best, ok
 	}
-	feeZat := uint64(5_000) * uint64(actions)
-	if n.AmountZat <= totalOut+feeZat {
+
+	requiredFee := func(spends, outputs int) uint64 {
+		actions := outputs
+		if spends > actions {
+			actions = spends
+		}
+		if actions < 2 {
+			actions = 2
+		}
+		return 5_000 * uint64(actions)
+	}
+
+	feeWithChange := requiredFee(1, len(outputs)+1)
+	needWithChange := totalOut + feeWithChange
+	n, ok := pickNote(needWithChange, true)
+	feeZat := feeWithChange
+	if !ok {
+		feeNoChange := requiredFee(1, len(outputs))
+		needNoChange := totalOut + feeNoChange
+		n, ok = pickNote(needNoChange, false)
+		feeZat = feeNoChange
+	}
+	if !ok {
 		t.Fatalf("insufficient note value")
+	}
+
+	key := fmt.Sprintf("%s:%d", n.TxID, n.OutIndex)
+	act, ok := orch.ByOutpoint[key]
+	if !ok {
+		t.Fatalf("missing orchard action for note %s", key)
 	}
 
 	w, err := witness.OrchardWitness(orch.CMXHex, []uint32{act.Position})

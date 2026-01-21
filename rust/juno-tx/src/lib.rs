@@ -39,12 +39,18 @@ use transparent::{
 use zcash_script::script;
 
 const HRP_JUNO_UA_MAIN: &str = "j";
+const HRP_JUNO_UA_TESTNET: &str = "jtest";
 const HRP_JUNO_UA_REGTEST: &str = "jregtest";
 const TYPECODE_ORCHARD: u64 = 0x03;
 
+const JUNO_COIN_TYPE_MAINNET: u32 = 8133;
+const JUNO_COIN_TYPE_TESTNET: u32 = 8134;
+const JUNO_COIN_TYPE_REGTEST: u32 = 8135;
+
 // Juno Cash transparent P2PKH Base58Check version bytes.
-// Expected to match `junocashd` mainnet params; commonly encodes to 't1...'.
-const TRANSPARENT_P2PKH_PREFIX: [u8; 2] = [0x1C, 0xB8];
+// Expected to match `junocashd` params; commonly encodes to 't1...' (mainnet) and 'tm...' (test/regtest).
+const TRANSPARENT_P2PKH_PREFIX_MAINNET: [u8; 2] = [0x1C, 0xB8];
+const TRANSPARENT_P2PKH_PREFIX_TESTNET: [u8; 2] = [0x1D, 0x25];
 
 const BIP32_HARDENED_KEY_LIMIT: u32 = 0x8000_0000;
 
@@ -197,7 +203,7 @@ fn decode_orchard_address(addr: &str) -> Result<OrchardAddress, TxBuildError> {
     if a.is_empty() {
         return Err(TxBuildError::AddressInvalid);
     }
-    for hrp in [HRP_JUNO_UA_MAIN, HRP_JUNO_UA_REGTEST] {
+    for hrp in [HRP_JUNO_UA_MAIN, HRP_JUNO_UA_TESTNET, HRP_JUNO_UA_REGTEST] {
         let Ok((typecode, value)) = zip316::decode_single_tlv_container(hrp, a) else {
             continue;
         };
@@ -212,6 +218,14 @@ fn decode_orchard_address(addr: &str) -> Result<OrchardAddress, TxBuildError> {
         return Ok(ct.unwrap());
     }
     Err(TxBuildError::AddressInvalid)
+}
+
+fn transparent_p2pkh_prefix(coin_type: u32) -> Result<[u8; 2], TxBuildError> {
+    match coin_type {
+        JUNO_COIN_TYPE_MAINNET => Ok(TRANSPARENT_P2PKH_PREFIX_MAINNET),
+        JUNO_COIN_TYPE_TESTNET | JUNO_COIN_TYPE_REGTEST => Ok(TRANSPARENT_P2PKH_PREFIX_TESTNET),
+        _ => Err(TxBuildError::CoinTypeInvalid),
+    }
 }
 
 fn empty_memo() -> [u8; 512] {
@@ -384,7 +398,7 @@ fn derive_transparent_keypair(
 
     let pk = SecpPublicKey::from_secret_key(&secp, &sk5);
     let pkh = hash160(&pk.serialize());
-    let addr = base58check_encode(&TRANSPARENT_P2PKH_PREFIX, &pkh)?;
+    let addr = base58check_encode(&transparent_p2pkh_prefix(coin_type)?, &pkh)?;
     Ok((sk5, pk, addr))
 }
 
@@ -456,7 +470,7 @@ fn build_send(req: &TxRequest) -> Result<(String, String, String), TxBuildError>
     }
 
     let fee_u64 = parse_u64_decimal(fee_zat)?;
-    let fee = Zatoshis::from_u64(fee_u64).map_err(|_| TxBuildError::FeeInvalid)?;
+    let _ = Zatoshis::from_u64(fee_u64).map_err(|_| TxBuildError::FeeInvalid)?;
 
     if outputs.is_empty() || outputs.len() > 200 {
         return Err(TxBuildError::OutputsInvalid);
@@ -567,7 +581,7 @@ fn build_send(req: &TxRequest) -> Result<(String, String, String), TxBuildError>
 
         let output_count = outputs_parsed.len() + if change > 0 { 1 } else { 0 };
         let required_fee = required_fee_send(notes.len(), output_count)?;
-        if fee != required_fee {
+        if fee_u64 < required_fee.into_u64() {
             return Err(TxBuildError::FeeInvalid);
         }
 

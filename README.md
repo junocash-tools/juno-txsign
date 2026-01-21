@@ -53,6 +53,10 @@ export LD_LIBRARY_PATH="$PWD/rust/juno-tx/target/release:$PWD/rust/witness/targe
   - success: `{"version":"v1","status":"ok","data":{"txid":"...","raw_tx_hex":"...","fee_zat":"..."}}`
   - error: `{"version":"v1","status":"err","error":{"code":"...","message":"..."}}`
 
+## Fees
+
+`juno-txsign` validates that `txplan.fee_zat` is **at least** the ZIP-317 conventional fee for the plan (based on note and output counts). Higher fees are allowed (they reduce the change output).
+
 ## Testing
 
 `make test` runs unit + integration + e2e suites (Dockerized `junocashd` regtest).
