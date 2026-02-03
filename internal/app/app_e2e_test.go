@@ -9,12 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Abdullah1738/juno-sdk-go/types"
 	"github.com/Abdullah1738/juno-txsign/internal/testutil/containers"
+	"github.com/Abdullah1738/juno-txsign/internal/testutil/junocashdutil"
 )
 
 func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
@@ -35,7 +37,14 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 
 	bin := filepath.Join(repoRoot(), "bin", "juno-txsign")
 
-	signWithAnySeed := func(t *testing.T, plan types.TxPlan) (string, string) {
+	type signResult struct {
+		TxID                       string
+		RawTxHex                   string
+		OrchardOutputActionIndices []uint32
+		OrchardChangeActionIndex   *uint32
+	}
+
+	signWithAnySeed := func(t *testing.T, plan types.TxPlan) signResult {
 		t.Helper()
 		var (
 			out     []byte
@@ -53,7 +62,7 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 				t.Fatalf("write seed: %v", err)
 			}
 
-			cmd := exec.CommandContext(ctx, bin, "sign", "--txplan", txplanPath, "--seed-file", seedPath, "--json")
+			cmd := exec.CommandContext(ctx, bin, "sign", "--txplan", txplanPath, "--seed-file", seedPath, "--json", "--action-indices")
 			b, err := cmd.Output()
 			if err == nil {
 				out = b
@@ -74,8 +83,10 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 		var resp struct {
 			Status string `json:"status"`
 			Data   struct {
-				TxID     string `json:"txid"`
-				RawTxHex string `json:"raw_tx_hex"`
+				TxID                       string   `json:"txid"`
+				RawTxHex                   string   `json:"raw_tx_hex"`
+				OrchardOutputActionIndices []uint32 `json:"orchard_output_action_indices"`
+				OrchardChangeActionIndex   *uint32  `json:"orchard_change_action_index"`
 			} `json:"data"`
 		}
 		decodeJSON(t, out, &resp)
@@ -85,17 +96,22 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 		if resp.Data.TxID == "" || resp.Data.RawTxHex == "" {
 			t.Fatalf("missing tx")
 		}
-		return resp.Data.TxID, resp.Data.RawTxHex
+		return signResult{
+			TxID:                       resp.Data.TxID,
+			RawTxHex:                   resp.Data.RawTxHex,
+			OrchardOutputActionIndices: resp.Data.OrchardOutputActionIndices,
+			OrchardChangeActionIndex:   resp.Data.OrchardChangeActionIndex,
+		}
 	}
 
-	broadcastMineAndAssert := func(t *testing.T, txid, rawTxHex, spentNoteID string) {
+	broadcastMineAndAssert := func(t *testing.T, plan types.TxPlan, res signResult, spentNoteID string) {
 		t.Helper()
 
 		var acceptedTxID string
-		if err := rpc.Call(ctx, "sendrawtransaction", []any{rawTxHex}, &acceptedTxID); err != nil {
+		if err := rpc.Call(ctx, "sendrawtransaction", []any{res.RawTxHex}, &acceptedTxID); err != nil {
 			t.Fatalf("sendrawtransaction: %v", err)
 		}
-		if !strings.EqualFold(acceptedTxID, txid) {
+		if !strings.EqualFold(acceptedTxID, res.TxID) {
 			t.Fatalf("txid mismatch")
 		}
 
@@ -121,7 +137,7 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 
 		var found bool
 		for _, got := range blk.Tx {
-			if strings.EqualFold(got, txid) {
+			if strings.EqualFold(got, res.TxID) {
 				found = true
 				break
 			}
@@ -131,12 +147,70 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 		}
 
 		waitSpendableOrchardNoteNot(t, jd, spentNoteID)
+
+		// Verify Orchard action indices match the notes the node wallet sees for this tx.
+		if len(res.OrchardOutputActionIndices) != len(plan.Outputs) {
+			t.Fatalf("orchard output index count mismatch: got %d want %d", len(res.OrchardOutputActionIndices), len(plan.Outputs))
+		}
+
+		notes, err := junocashdutil.ListUnspentOrchard(ctx, jd, 1, 0)
+		if err != nil {
+			t.Fatalf("z_listunspent: %v", err)
+		}
+		var txNotes []junocashdutil.UnspentOrchardNote
+		for _, n := range notes {
+			if strings.EqualFold(n.TxID, res.TxID) {
+				txNotes = append(txNotes, n)
+			}
+		}
+		if len(txNotes) == 0 {
+			t.Fatalf("expected unspent orchard notes for tx")
+		}
+
+		for i := range plan.Outputs {
+			amt, err := strconv.ParseUint(strings.TrimSpace(plan.Outputs[i].AmountZat), 10, 64)
+			if err != nil {
+				t.Fatalf("outputs[%d].amount_zat invalid: %v", i, err)
+			}
+			wantIdx := res.OrchardOutputActionIndices[i]
+
+			var ok bool
+			for _, n := range txNotes {
+				if n.OutIndex == wantIdx && n.AmountZat == amt {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				t.Fatalf("missing orchard note for outputs[%d] at action_index=%d", i, wantIdx)
+			}
+		}
+
+		if res.OrchardChangeActionIndex != nil {
+			wantIdx := *res.OrchardChangeActionIndex
+			var ok bool
+			for _, n := range txNotes {
+				if n.OutIndex == wantIdx {
+					if n.AmountZat == 0 {
+						t.Fatalf("change note amount is 0")
+					}
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				t.Fatalf("missing orchard change note at action_index=%d", wantIdx)
+			}
+		}
 	}
 
 	t.Run("withdrawal", func(t *testing.T) {
 		plan := buildSingleNoteWithdrawalPlan(t, rpc, jd, toAddr, changeAddr, 1_000_000)
-		txid, raw := signWithAnySeed(t, plan)
-		broadcastMineAndAssert(t, txid, raw, plan.Notes[0].NoteID)
+		res := signWithAnySeed(t, plan)
+		if res.OrchardChangeActionIndex == nil {
+			t.Fatalf("expected change output")
+		}
+		broadcastMineAndAssert(t, plan, res, plan.Notes[0].NoteID)
 	})
 
 	t.Run("multi_output", func(t *testing.T) {
@@ -144,14 +218,20 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 			{ToAddress: toAddr, AmountZat: "1000000"},
 			{ToAddress: toAddr, AmountZat: "2000000"},
 		}, changeAddr, types.TxPlanKindWithdrawal)
-		txid, raw := signWithAnySeed(t, plan)
-		broadcastMineAndAssert(t, txid, raw, plan.Notes[0].NoteID)
+		res := signWithAnySeed(t, plan)
+		if res.OrchardChangeActionIndex == nil {
+			t.Fatalf("expected change output")
+		}
+		broadcastMineAndAssert(t, plan, res, plan.Notes[0].NoteID)
 	})
 
 	t.Run("sweep", func(t *testing.T) {
 		plan := buildSingleNoteSweepPlan(t, rpc, jd, toAddr, toAddr)
-		txid, raw := signWithAnySeed(t, plan)
-		broadcastMineAndAssert(t, txid, raw, plan.Notes[0].NoteID)
+		res := signWithAnySeed(t, plan)
+		broadcastMineAndAssert(t, plan, res, plan.Notes[0].NoteID)
+		if res.OrchardChangeActionIndex != nil {
+			t.Fatalf("expected no change output")
+		}
 	})
 }
 

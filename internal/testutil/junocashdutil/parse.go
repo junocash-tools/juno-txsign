@@ -39,4 +39,3 @@ func parseZECToZat(s string) (uint64, error) {
 	}
 	return w*100_000_000 + f, nil
 }
-

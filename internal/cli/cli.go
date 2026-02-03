@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Abdullah1738/juno-sdk-go/types"
+	"github.com/Abdullah1738/juno-txsign/internal/cliout"
 	"github.com/Abdullah1738/juno-txsign/pkg/txsign"
 )
 
@@ -47,7 +48,7 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(w, "Offline signer for TxPlan v0 packages.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  juno-txsign sign --txplan <path|-> --seed-base64 <b64> [--out <path>] [--json]")
+	fmt.Fprintln(w, "  juno-txsign sign --txplan <path|-> --seed-base64 <b64> [--out <path>] [--json] [--action-indices]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Notes:")
 	fmt.Fprintln(w, "  - This command performs no network calls.")
@@ -63,12 +64,14 @@ func runSign(args []string, stdout, stderr io.Writer) int {
 	var seedFile string
 	var outPath string
 	var jsonOut bool
+	var actionIndices bool
 
 	fs.StringVar(&txplanPath, "txplan", "", "path to TxPlan JSON (or - for stdin)")
 	fs.StringVar(&seedBase64, "seed-base64", "", "seed in base64")
 	fs.StringVar(&seedFile, "seed-file", "", "path to file containing base64 seed")
 	fs.StringVar(&outPath, "out", "", "optional path to write raw tx hex")
 	fs.BoolVar(&jsonOut, "json", false, "JSON output")
+	fs.BoolVar(&actionIndices, "action-indices", false, "include Orchard output action indices (requires --json)")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(stderr, err.Error())
@@ -105,14 +108,21 @@ func runSign(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if jsonOut {
+		data := cliout.SignJSONData(
+			cliout.SignOutput{
+				TxID:                       res.TxID,
+				RawTxHex:                   res.RawTxHex,
+				FeeZat:                     res.FeeZat,
+				OrchardOutputActionIndices: res.OrchardOutputActionIndices,
+				OrchardChangeActionIndex:   res.OrchardChangeActionIndex,
+			},
+			actionIndices,
+		)
+
 		_ = json.NewEncoder(stdout).Encode(map[string]any{
 			"version": jsonVersionV1,
 			"status":  "ok",
-			"data": map[string]any{
-				"txid":       res.TxID,
-				"raw_tx_hex": res.RawTxHex,
-				"fee_zat":    res.FeeZat,
-			},
+			"data":    data,
 		})
 		return 0
 	}

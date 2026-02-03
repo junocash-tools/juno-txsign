@@ -107,10 +107,21 @@ enum TxResponse {
         txid: String,
         raw_tx_hex: String,
         fee_zat: String,
+        orchard_output_action_indices: Vec<u32>,
+        orchard_change_action_index: Option<u32>,
     },
     Err {
         error: String,
     },
+}
+
+#[derive(Debug)]
+struct BuiltTx {
+    txid: String,
+    raw_tx_hex: String,
+    fee_zat: String,
+    orchard_output_action_indices: Vec<u32>,
+    orchard_change_action_index: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -437,7 +448,7 @@ fn orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
     ORCHARD_PROVING_KEY.get_or_init(orchard::circuit::ProvingKey::build)
 }
 
-fn build_send(req: &TxRequest) -> Result<(String, String, String), TxBuildError> {
+fn build_send(req: &TxRequest) -> Result<BuiltTx, TxBuildError> {
     let TxRequest::Send {
         seed_base64,
         coin_type,
@@ -480,7 +491,7 @@ fn build_send(req: &TxRequest) -> Result<(String, String, String), TxBuildError>
     }
 
     let mut seed = decode_seed(seed_base64)?;
-    let res = (|| -> Result<(String, String, String), TxBuildError> {
+    let res = (|| -> Result<BuiltTx, TxBuildError> {
         let acc = zip32::AccountId::try_from(*account).map_err(|_| TxBuildError::AccountInvalid)?;
         let sk = SpendingKey::from_zip32_seed(&seed, *coin_type, acc)
             .map_err(|_| TxBuildError::SeedInvalid)?;
@@ -608,11 +619,26 @@ fn build_send(req: &TxRequest) -> Result<(String, String, String), TxBuildError>
         }
 
         let mut rng = OsRng;
-        let orchard_bundle = orchard_builder
+        let (orchard_bundle, meta) = orchard_builder
             .build::<zcash_protocol::value::ZatBalance>(&mut rng)
             .map_err(|_| TxBuildError::TxBuildFailed)?
-            .map(|(b, _meta)| b)
             .ok_or(TxBuildError::TxBuildFailed)?;
+
+        let mut orchard_output_action_indices = Vec::with_capacity(outputs.len());
+        for i in 0..outputs.len() {
+            let idx = meta
+                .output_action_index(i)
+                .ok_or(TxBuildError::TxBuildFailed)?;
+            orchard_output_action_indices.push(idx as u32);
+        }
+        let orchard_change_action_index = if change > 0 {
+            let idx = meta
+                .output_action_index(outputs.len())
+                .ok_or(TxBuildError::TxBuildFailed)?;
+            Some(idx as u32)
+        } else {
+            None
+        };
 
         let version = TxVersion::suggested_for_branch(branch_id);
         let unauthed: TransactionData<zcash_primitives::transaction::Unauthorized> =
@@ -667,18 +693,20 @@ fn build_send(req: &TxRequest) -> Result<(String, String, String), TxBuildError>
         tx.write(&mut bytes)
             .map_err(|_| TxBuildError::TxBuildFailed)?;
 
-        Ok((
-            tx.txid().to_string(),
-            hex::encode(bytes),
-            fee_u64.to_string(),
-        ))
+        Ok(BuiltTx {
+            txid: tx.txid().to_string(),
+            raw_tx_hex: hex::encode(bytes),
+            fee_zat: fee_u64.to_string(),
+            orchard_output_action_indices,
+            orchard_change_action_index,
+        })
     })();
 
     seed.zeroize();
     res
 }
 
-fn build_shield(req: &TxRequest) -> Result<(String, String, String), TxBuildError> {
+fn build_shield(req: &TxRequest) -> Result<BuiltTx, TxBuildError> {
     let TxRequest::Shield {
         seed_base64,
         coin_type,
@@ -717,7 +745,7 @@ fn build_shield(req: &TxRequest) -> Result<(String, String, String), TxBuildErro
     }
 
     let mut seed = decode_seed(seed_base64)?;
-    let res = (|| -> Result<(String, String, String), TxBuildError> {
+    let res = (|| -> Result<BuiltTx, TxBuildError> {
         let anchor_bytes = parse_hex::<32>(anchor, TxBuildError::AnchorInvalid)?;
         let anchor_ct = Anchor::from_bytes(anchor_bytes);
         if bool::from(anchor_ct.is_none()) {
@@ -809,10 +837,13 @@ fn build_shield(req: &TxRequest) -> Result<(String, String, String), TxBuildErro
             .map_err(|_| TxBuildError::TxBuildFailed)?;
 
         let mut rng = OsRng;
-        let orchard_bundle = orchard_builder
+        let (orchard_bundle, meta) = orchard_builder
             .build::<zcash_protocol::value::ZatBalance>(&mut rng)
             .map_err(|_| TxBuildError::TxBuildFailed)?
-            .map(|(b, _meta)| b)
+            .ok_or(TxBuildError::TxBuildFailed)?;
+
+        let idx = meta
+            .output_action_index(0)
             .ok_or(TxBuildError::TxBuildFailed)?;
 
         let transparent_bundle = t_builder.build().ok_or(TxBuildError::TxBuildFailed)?;
@@ -882,11 +913,13 @@ fn build_shield(req: &TxRequest) -> Result<(String, String, String), TxBuildErro
         tx.write(&mut bytes)
             .map_err(|_| TxBuildError::TxBuildFailed)?;
 
-        Ok((
-            tx.txid().to_string(),
-            hex::encode(bytes),
-            fee_u64.to_string(),
-        ))
+        Ok(BuiltTx {
+            txid: tx.txid().to_string(),
+            raw_tx_hex: hex::encode(bytes),
+            fee_zat: fee_u64.to_string(),
+            orchard_output_action_indices: vec![idx as u32],
+            orchard_change_action_index: None,
+        })
     })();
 
     seed.zeroize();
@@ -894,14 +927,16 @@ fn build_shield(req: &TxRequest) -> Result<(String, String, String), TxBuildErro
 }
 
 fn handle(req: TxRequest) -> Result<TxResponse, TxBuildError> {
-    let (txid, raw_tx_hex, fee_zat) = match &req {
+    let built = match &req {
         TxRequest::Send { .. } => build_send(&req)?,
         TxRequest::Shield { .. } => build_shield(&req)?,
     };
     Ok(TxResponse::Ok {
-        txid,
-        raw_tx_hex,
-        fee_zat,
+        txid: built.txid,
+        raw_tx_hex: built.raw_tx_hex,
+        fee_zat: built.fee_zat,
+        orchard_output_action_indices: built.orchard_output_action_indices,
+        orchard_change_action_index: built.orchard_change_action_index,
     })
 }
 

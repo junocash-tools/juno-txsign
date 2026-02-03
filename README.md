@@ -51,6 +51,9 @@ export LD_LIBRARY_PATH="$PWD/rust/juno-tx/target/release:$PWD/rust/witness/targe
 - `--out <path>` writes the raw tx hex with a trailing newline (mode `0600`)
 - `--json` envelope:
   - success: `{"version":"v1","status":"ok","data":{"txid":"...","raw_tx_hex":"...","fee_zat":"..."}}`
+    - with `--action-indices`, `data` also includes:
+      - `orchard_output_action_indices`: array of Orchard action indices aligned to `txplan.outputs` order
+      - `orchard_change_action_index`: Orchard action index for the change output, or `null` if no change output was created
   - error: `{"version":"v1","status":"err","error":{"code":"...","message":"..."}}`
 
 ## Fees

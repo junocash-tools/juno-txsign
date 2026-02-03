@@ -16,6 +16,9 @@ type Result struct {
 	TxID     string
 	RawTxHex string
 	FeeZat   string
+
+	OrchardOutputActionIndices []uint32
+	OrchardChangeActionIndex   *uint32
 }
 
 func Sign(ctx context.Context, txplan types.TxPlan, seedBase64 string) (Result, error) {
@@ -32,11 +35,13 @@ func Sign(ctx context.Context, txplan types.TxPlan, seedBase64 string) (Result, 
 	}
 
 	var resp struct {
-		Status   string `json:"status"`
-		TxID     string `json:"txid,omitempty"`
-		RawTxHex string `json:"raw_tx_hex,omitempty"`
-		FeeZat   string `json:"fee_zat,omitempty"`
-		Error    string `json:"error,omitempty"`
+		Status                     string   `json:"status"`
+		TxID                       string   `json:"txid,omitempty"`
+		RawTxHex                   string   `json:"raw_tx_hex,omitempty"`
+		FeeZat                     string   `json:"fee_zat,omitempty"`
+		OrchardOutputActionIndices []uint32 `json:"orchard_output_action_indices,omitempty"`
+		OrchardChangeActionIndex   *uint32  `json:"orchard_change_action_index,omitempty"`
+		Error                      string   `json:"error,omitempty"`
 	}
 	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
 		return Result{}, errors.New("txsign: invalid response")
@@ -51,9 +56,11 @@ func Sign(ctx context.Context, txplan types.TxPlan, seedBase64 string) (Result, 
 			return Result{}, errors.New("txsign: invalid response")
 		}
 		return Result{
-			TxID:     txid,
-			RawTxHex: rawTx,
-			FeeZat:   fee,
+			TxID:                       txid,
+			RawTxHex:                   rawTx,
+			FeeZat:                     fee,
+			OrchardOutputActionIndices: resp.OrchardOutputActionIndices,
+			OrchardChangeActionIndex:   resp.OrchardChangeActionIndex,
 		}, nil
 	case "err":
 		if strings.TrimSpace(resp.Error) == "" {

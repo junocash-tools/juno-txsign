@@ -136,4 +136,3 @@ func waitOperationTxID(ctx context.Context, jd *containers.Junocashd, opid strin
 		}
 	}
 }
-

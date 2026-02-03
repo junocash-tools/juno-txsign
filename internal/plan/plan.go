@@ -16,17 +16,17 @@ var (
 )
 
 type SendRequest struct {
-	Type          string `json:"type"`
-	SeedBase64    string `json:"seed_base64"`
-	CoinType      uint32 `json:"coin_type"`
-	Account       uint32 `json:"account"`
-	BranchID      uint32 `json:"branch_id"`
-	ExpiryHeight  uint32 `json:"expiry_height"`
-	Anchor        string `json:"anchor"`
+	Type          string           `json:"type"`
+	SeedBase64    string           `json:"seed_base64"`
+	CoinType      uint32           `json:"coin_type"`
+	Account       uint32           `json:"account"`
+	BranchID      uint32           `json:"branch_id"`
+	ExpiryHeight  uint32           `json:"expiry_height"`
+	Anchor        string           `json:"anchor"`
 	Outputs       []types.TxOutput `json:"outputs"`
-	FeeZat        string `json:"fee_zat"`
-	ChangeAddress string `json:"change_address"`
-	Notes         []Note `json:"notes"`
+	FeeZat        string           `json:"fee_zat"`
+	ChangeAddress string           `json:"change_address"`
+	Notes         []Note           `json:"notes"`
 }
 
 type Note struct {
