@@ -29,6 +29,19 @@ type SendRequest struct {
 	Notes         []Note           `json:"notes"`
 }
 
+type ExtPrepareRequest struct {
+	Ufvk          string           `json:"ufvk"`
+	CoinType      uint32           `json:"coin_type"`
+	Account       uint32           `json:"account"`
+	BranchID      uint32           `json:"branch_id"`
+	ExpiryHeight  uint32           `json:"expiry_height"`
+	Anchor        string           `json:"anchor"`
+	Outputs       []types.TxOutput `json:"outputs"`
+	FeeZat        string           `json:"fee_zat"`
+	ChangeAddress string           `json:"change_address"`
+	Notes         []Note           `json:"notes"`
+}
+
 type Note struct {
 	NoteID          string   `json:"note_id,omitempty"`
 	ActionNullifier string   `json:"action_nullifier"`
@@ -73,6 +86,66 @@ func BuildSendRequestJSON(txplan types.TxPlan, seedBase64 string) (string, error
 	req := SendRequest{
 		Type:          "send",
 		SeedBase64:    seedBase64,
+		CoinType:      txplan.CoinType,
+		Account:       txplan.Account,
+		BranchID:      txplan.BranchID,
+		ExpiryHeight:  txplan.ExpiryHeight,
+		Anchor:        txplan.Anchor,
+		FeeZat:        txplan.FeeZat,
+		Outputs:       txplan.Outputs,
+		ChangeAddress: txplan.ChangeAddress,
+		Notes:         make([]Note, 0, len(txplan.Notes)),
+	}
+
+	for _, n := range txplan.Notes {
+		req.Notes = append(req.Notes, Note{
+			NoteID:          strings.TrimSpace(n.NoteID),
+			ActionNullifier: strings.TrimSpace(n.ActionNullifier),
+			CMX:             strings.TrimSpace(n.CMX),
+			Position:        n.Position,
+			Path:            n.Path,
+			EphemeralKey:    strings.TrimSpace(n.EphemeralKey),
+			EncCiphertext:   strings.TrimSpace(n.EncCiphertext),
+		})
+	}
+
+	b, err := json.Marshal(req)
+	if err != nil {
+		return "", errors.New("marshal tx request")
+	}
+	return string(b), nil
+}
+
+func BuildExtPrepareRequestJSON(txplan types.TxPlan, ufvk string) (string, error) {
+	if err := ValidateTxPlanV0(txplan); err != nil {
+		return "", err
+	}
+	ufvk = strings.TrimSpace(ufvk)
+	if ufvk == "" {
+		return "", fmt.Errorf("%w: ufvk required", ErrInvalidPlan)
+	}
+
+	if len(txplan.Outputs) == 0 {
+		return "", fmt.Errorf("%w: outputs required", ErrInvalidPlan)
+	}
+	if len(txplan.Outputs) > 200 {
+		return "", fmt.Errorf("%w: outputs too large", ErrInvalidPlan)
+	}
+	for i, out := range txplan.Outputs {
+		if strings.TrimSpace(out.ToAddress) == "" {
+			return "", fmt.Errorf("%w: outputs[%d].to_address required", ErrInvalidPlan, i)
+		}
+		if strings.TrimSpace(out.AmountZat) == "" {
+			return "", fmt.Errorf("%w: outputs[%d].amount_zat required", ErrInvalidPlan, i)
+		}
+	}
+
+	if strings.TrimSpace(txplan.FeeZat) == "" {
+		return "", fmt.Errorf("%w: fee_zat required", ErrInvalidPlan)
+	}
+
+	req := ExtPrepareRequest{
+		Ufvk:          ufvk,
 		CoinType:      txplan.CoinType,
 		Account:       txplan.Account,
 		BranchID:      txplan.BranchID,

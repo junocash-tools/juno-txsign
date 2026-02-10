@@ -5,6 +5,7 @@ mod zip316;
 
 use base64::Engine as _;
 use core::ffi::c_char;
+use ff::PrimeField;
 use orchard::{
     keys::{FullViewingKey, Scope, SpendAuthorizingKey, SpendingKey},
     note::ExtractedNoteCommitment,
@@ -14,6 +15,7 @@ use orchard::{
 };
 use rand::rngs::OsRng;
 use ripemd::Ripemd160;
+use sapling::builder as sapling_builder;
 use secp256k1::{PublicKey as SecpPublicKey, Secp256k1, SecretKey as SecpSecretKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256, Sha512};
@@ -41,6 +43,9 @@ use zcash_script::script;
 const HRP_JUNO_UA_MAIN: &str = "j";
 const HRP_JUNO_UA_TESTNET: &str = "jtest";
 const HRP_JUNO_UA_REGTEST: &str = "jregtest";
+const HRP_JUNO_UFVK_MAIN: &str = "jview";
+const HRP_JUNO_UFVK_TESTNET: &str = "jviewtest";
+const HRP_JUNO_UFVK_REGTEST: &str = "jviewregtest";
 const TYPECODE_ORCHARD: u64 = 0x03;
 
 const JUNO_COIN_TYPE_MAINNET: u32 = 8133;
@@ -53,6 +58,15 @@ const TRANSPARENT_P2PKH_PREFIX_MAINNET: [u8; 2] = [0x1C, 0xB8];
 const TRANSPARENT_P2PKH_PREFIX_TESTNET: [u8; 2] = [0x1D, 0x25];
 
 const BIP32_HARDENED_KEY_LIMIT: u32 = 0x8000_0000;
+
+#[derive(Debug)]
+struct OrchardEffectsOnlyAuth;
+
+impl zcash_primitives::transaction::Authorization for OrchardEffectsOnlyAuth {
+    type TransparentAuth = transparent::builder::Unauthorized;
+    type SaplingAuth = sapling_builder::InProgress<sapling_builder::Proven, sapling_builder::Unsigned>;
+    type OrchardAuth = orchard::bundle::EffectsOnly;
+}
 
 #[derive(Debug, Error, Clone, Copy)]
 enum TxBuildError {
@@ -88,12 +102,42 @@ enum TxBuildError {
     WitnessInvalid,
     #[error("note_decrypt_failed")]
     NoteDecryptFailed,
+    #[error("ufvk_empty")]
+    UfvkEmpty,
+    #[error("ufvk_invalid_bech32m")]
+    UfvkInvalidBech32m,
+    #[error("ufvk_hrp_mismatch")]
+    UfvkHrpMismatch,
+    #[error("ufvk_tlv_invalid")]
+    UfvkTlvInvalid,
+    #[error("ufvk_typecode_unsupported")]
+    UfvkTypecodeUnsupported,
+    #[error("ufvk_value_len_invalid")]
+    UfvkValueLenInvalid,
+    #[error("ufvk_fvk_bytes_invalid")]
+    UfvkFvkBytesInvalid,
     #[error("insufficient_funds")]
     InsufficientFunds,
     #[error("transparent_key_not_found")]
     TransparentKeyNotFound,
     #[error("transparent_utxo_invalid")]
     TransparentUTXOInvalid,
+    #[error("prepared_tx_invalid")]
+    PreparedTxInvalid,
+    #[error("prepared_tx_version_unsupported")]
+    PreparedTxVersionUnsupported,
+    #[error("prepared_tx_pczt_invalid")]
+    PreparedTxPcztInvalid,
+    #[error("spend_auth_sigs_invalid")]
+    SpendAuthSigsInvalid,
+    #[error("spend_auth_sig_missing")]
+    SpendAuthSigMissing,
+    #[error("spend_auth_sig_duplicate")]
+    SpendAuthSigDuplicate,
+    #[error("spend_auth_sig_wrong_action")]
+    SpendAuthSigWrongAction,
+    #[error("spend_auth_sig_invalid")]
+    SpendAuthSigInvalid,
     #[error("tx_build_failed")]
     TxBuildFailed,
     #[error("panic")]
@@ -180,6 +224,129 @@ enum TxRequest {
     },
 }
 
+const EXT_V0: &str = "v0";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExtPrepareRequest {
+    ufvk: String,
+    coin_type: u32,
+    account: u32,
+    branch_id: u32,
+    expiry_height: u32,
+    anchor: String,
+    outputs: Vec<OrchardOutput>,
+    fee_zat: String,
+    change_address: String,
+    notes: Vec<OrchardSpendNote>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SigningRequestV0 {
+    sighash: String,
+    action_index: u32,
+    alpha: String,
+    rk: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SigningRequestsV0 {
+    version: String,
+    requests: Vec<SigningRequestV0>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpendAuthSigV0 {
+    action_index: u32,
+    spend_auth_sig: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpendAuthSigSubmissionV0 {
+    version: String,
+    signatures: Vec<SpendAuthSigV0>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrchardValueSumV0 {
+    magnitude: u64,
+    is_negative: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrchardPcztSpendV0 {
+    nullifier: String,
+    rk: String,
+    spend_auth_sig: Option<String>,
+    alpha: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrchardPcztOutputV0 {
+    cmx: String,
+    ephemeral_key: String,
+    enc_ciphertext: String,
+    out_ciphertext: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrchardPcztActionV0 {
+    cv_net: String,
+    spend: OrchardPcztSpendV0,
+    output: OrchardPcztOutputV0,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OrchardPcztBundleV0 {
+    actions: Vec<OrchardPcztActionV0>,
+    flags: u8,
+    value_sum: OrchardValueSumV0,
+    anchor: String,
+    zkproof: Option<String>,
+    bsk: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedTxV0 {
+    version: String,
+    branch_id: u32,
+    expiry_height: u32,
+    fee_zat: String,
+    orchard_output_action_indices: Vec<u32>,
+    orchard_change_action_index: Option<u32>,
+    orchard_required_spend_action_indices: Vec<u32>,
+    orchard_pczt: OrchardPcztBundleV0,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum ExtPrepareResponse {
+    Ok {
+        prepared_tx: PreparedTxV0,
+        signing_requests: SigningRequestsV0,
+    },
+    Err {
+        error: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExtFinalizeRequest {
+    prepared_tx: PreparedTxV0,
+    spend_auth_sigs: SpendAuthSigSubmissionV0,
+}
+
 fn parse_u64_decimal(s: &str) -> Result<u64, TxBuildError> {
     let t = s.trim();
     if t.is_empty() {
@@ -229,6 +396,65 @@ fn decode_orchard_address(addr: &str) -> Result<OrchardAddress, TxBuildError> {
         return Ok(ct.unwrap());
     }
     Err(TxBuildError::AddressInvalid)
+}
+
+fn map_ufvk_zip316_error(e: zip316::Zip316Error) -> TxBuildError {
+    use zip316::Zip316Error;
+    match e {
+        Zip316Error::Bech32DecodeFailed | Zip316Error::PaddingInvalid | Zip316Error::F4JumbleFailed => {
+            TxBuildError::UfvkInvalidBech32m
+        }
+        Zip316Error::HrpMismatch => TxBuildError::UfvkHrpMismatch,
+        Zip316Error::TlvInvalid | Zip316Error::TlvTrailingBytes => TxBuildError::UfvkTlvInvalid,
+        #[cfg(test)]
+        Zip316Error::HrpTooLong
+        | Zip316Error::InvalidHrp
+        | Zip316Error::PayloadTooShort
+        | Zip316Error::Bech32EncodeFailed => TxBuildError::UfvkInvalidBech32m,
+    }
+}
+
+fn decode_fvk_from_ufvk(ufvk: &str) -> Result<FullViewingKey, TxBuildError> {
+    let ufvk = ufvk.trim();
+    if ufvk.is_empty() {
+        return Err(TxBuildError::UfvkEmpty);
+    }
+
+    let mut last_hrp_mismatch = false;
+    for hrp in [HRP_JUNO_UFVK_MAIN, HRP_JUNO_UFVK_TESTNET, HRP_JUNO_UFVK_REGTEST] {
+        match zip316::decode_tlv_container(hrp, ufvk) {
+            Ok(items) => {
+                let mut orchard_value: Option<Vec<u8>> = None;
+                for (typecode, value) in items {
+                    if typecode != TYPECODE_ORCHARD {
+                        continue;
+                    }
+                    if orchard_value.is_some() {
+                        return Err(TxBuildError::UfvkTlvInvalid);
+                    }
+                    orchard_value = Some(value);
+                }
+
+                let value = orchard_value.ok_or(TxBuildError::UfvkTypecodeUnsupported)?;
+                if value.len() != 96 {
+                    return Err(TxBuildError::UfvkValueLenInvalid);
+                }
+                let fvk_bytes: [u8; 96] =
+                    value.try_into().map_err(|_| TxBuildError::UfvkValueLenInvalid)?;
+                return FullViewingKey::from_bytes(&fvk_bytes).ok_or(TxBuildError::UfvkFvkBytesInvalid);
+            }
+            Err(zip316::Zip316Error::HrpMismatch) => {
+                last_hrp_mismatch = true;
+                continue;
+            }
+            Err(e) => return Err(map_ufvk_zip316_error(e)),
+        }
+    }
+    if last_hrp_mismatch {
+        Err(TxBuildError::UfvkHrpMismatch)
+    } else {
+        Err(TxBuildError::UfvkInvalidBech32m)
+    }
 }
 
 fn transparent_p2pkh_prefix(coin_type: u32) -> Result<[u8; 2], TxBuildError> {
@@ -926,6 +1152,554 @@ fn build_shield(req: &TxRequest) -> Result<BuiltTx, TxBuildError> {
     res
 }
 
+fn shielded_sighash_orchard_effects(
+    branch_id: BranchId,
+    expiry_height: u32,
+    orchard_bundle: Option<orchard::Bundle<orchard::bundle::EffectsOnly, zcash_protocol::value::ZatBalance>>,
+) -> Result<[u8; 32], TxBuildError> {
+    let version = TxVersion::suggested_for_branch(branch_id);
+    let tx: TransactionData<OrchardEffectsOnlyAuth> = TransactionData::from_parts(
+        version,
+        branch_id,
+        0,
+        BlockHeight::from(expiry_height),
+        None,
+        None,
+        None,
+        orchard_bundle,
+    );
+    let txid_parts = tx.digest(TxIdDigester);
+    Ok(*signature_hash(&tx, &SignableInput::Shielded, &txid_parts).as_ref())
+}
+
+fn shielded_sighash_for_orchard_pczt(
+    branch_id: BranchId,
+    expiry_height: u32,
+    pczt_bundle: &orchard::pczt::Bundle,
+) -> Result<[u8; 32], TxBuildError> {
+    let effects = pczt_bundle
+        .extract_effects::<zcash_protocol::value::ZatBalance>()
+        .map_err(|_| TxBuildError::PreparedTxPcztInvalid)?;
+    let effects = effects.ok_or(TxBuildError::PreparedTxPcztInvalid)?;
+    shielded_sighash_orchard_effects(branch_id, expiry_height, Some(effects))
+}
+
+fn orchard_pczt_bundle_to_v0(bundle: &orchard::pczt::Bundle) -> OrchardPcztBundleV0 {
+    let (magnitude, sign) = bundle.value_sum().magnitude_sign();
+    let value_sum = OrchardValueSumV0 {
+        magnitude,
+        is_negative: matches!(sign, orchard::value::Sign::Negative),
+    };
+
+    let actions = bundle
+        .actions()
+        .iter()
+        .map(|a| {
+            let spend = a.spend();
+            let output = a.output();
+            let encrypted_note = output.encrypted_note();
+
+            OrchardPcztActionV0 {
+                cv_net: hex::encode(a.cv_net().to_bytes()),
+                spend: OrchardPcztSpendV0 {
+                    nullifier: hex::encode(spend.nullifier().to_bytes()),
+                    rk: hex::encode(<[u8; 32]>::from(spend.rk())),
+                    spend_auth_sig: spend
+                        .spend_auth_sig()
+                        .as_ref()
+                        .map(|sig| hex::encode(<[u8; 64]>::from(sig))),
+                    alpha: spend.alpha().as_ref().map(|alpha| hex::encode(alpha.to_repr())),
+                },
+                output: OrchardPcztOutputV0 {
+                    cmx: hex::encode(output.cmx().to_bytes()),
+                    ephemeral_key: hex::encode(encrypted_note.epk_bytes),
+                    enc_ciphertext: hex::encode(encrypted_note.enc_ciphertext),
+                    out_ciphertext: hex::encode(encrypted_note.out_ciphertext),
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+
+    OrchardPcztBundleV0 {
+        actions,
+        flags: bundle.flags().to_byte(),
+        value_sum,
+        anchor: hex::encode(bundle.anchor().to_bytes()),
+        zkproof: bundle.zkproof().as_ref().map(|p| hex::encode(p.as_ref())),
+        bsk: bundle
+            .bsk()
+            .as_ref()
+            .map(|bsk| hex::encode(<[u8; 32]>::from(bsk))),
+    }
+}
+
+fn orchard_pczt_bundle_from_v0(
+    bundle: &OrchardPcztBundleV0,
+    injected_sigs: &std::collections::BTreeMap<u32, [u8; 64]>,
+) -> Result<orchard::pczt::Bundle, TxBuildError> {
+    let mut actions = Vec::with_capacity(bundle.actions.len());
+    for (i, a) in bundle.actions.iter().enumerate() {
+        let action_index = i as u32;
+
+        let cv_net = parse_hex::<32>(&a.cv_net, TxBuildError::PreparedTxPcztInvalid)?;
+        let nullifier = parse_hex::<32>(&a.spend.nullifier, TxBuildError::PreparedTxPcztInvalid)?;
+        let rk = parse_hex::<32>(&a.spend.rk, TxBuildError::PreparedTxPcztInvalid)?;
+
+        let spend_auth_sig = if let Some(sig) = injected_sigs.get(&action_index) {
+            Some(*sig)
+        } else {
+            a.spend
+                .spend_auth_sig
+                .as_deref()
+                .map(|s| parse_hex::<64>(s, TxBuildError::PreparedTxPcztInvalid))
+                .transpose()?
+        };
+
+        let alpha = a
+            .spend
+            .alpha
+            .as_deref()
+            .map(|s| parse_hex::<32>(s, TxBuildError::PreparedTxPcztInvalid))
+            .transpose()?;
+
+        let spend = orchard::pczt::Spend::parse(
+            nullifier,
+            rk,
+            spend_auth_sig,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            alpha,
+            None,
+            None,
+            std::collections::BTreeMap::new(),
+        )
+        .map_err(|_| TxBuildError::PreparedTxPcztInvalid)?;
+
+        let cmx = parse_hex::<32>(&a.output.cmx, TxBuildError::PreparedTxPcztInvalid)?;
+        let epk = parse_hex::<32>(&a.output.ephemeral_key, TxBuildError::PreparedTxPcztInvalid)?;
+        let enc_ciphertext = hex::decode(a.output.enc_ciphertext.trim())
+            .map_err(|_| TxBuildError::PreparedTxPcztInvalid)?;
+        let out_ciphertext = hex::decode(a.output.out_ciphertext.trim())
+            .map_err(|_| TxBuildError::PreparedTxPcztInvalid)?;
+
+        let output = orchard::pczt::Output::parse(
+            *spend.nullifier(),
+            cmx,
+            epk,
+            enc_ciphertext,
+            out_ciphertext,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            std::collections::BTreeMap::new(),
+        )
+        .map_err(|_| TxBuildError::PreparedTxPcztInvalid)?;
+
+        let action = orchard::pczt::Action::parse(cv_net, spend, output, None)
+            .map_err(|_| TxBuildError::PreparedTxPcztInvalid)?;
+        actions.push(action);
+    }
+
+    let (magnitude, is_negative) = (bundle.value_sum.magnitude, bundle.value_sum.is_negative);
+    let anchor = parse_hex::<32>(&bundle.anchor, TxBuildError::PreparedTxPcztInvalid)?;
+    let zkproof = bundle
+        .zkproof
+        .as_deref()
+        .map(|s| hex::decode(s.trim()).map_err(|_| TxBuildError::PreparedTxPcztInvalid))
+        .transpose()?;
+    let bsk = bundle
+        .bsk
+        .as_deref()
+        .map(|s| parse_hex::<32>(s, TxBuildError::PreparedTxPcztInvalid))
+        .transpose()?;
+
+    orchard::pczt::Bundle::parse(
+        actions,
+        bundle.flags,
+        (magnitude, is_negative),
+        anchor,
+        zkproof,
+        bsk,
+    )
+    .map_err(|_| TxBuildError::PreparedTxPcztInvalid)
+}
+
+fn signing_requests_from_pczt_v0(
+    sighash: [u8; 32],
+    required_spend_action_indices: &[u32],
+    pczt_bundle: &orchard::pczt::Bundle,
+) -> Result<SigningRequestsV0, TxBuildError> {
+    let sighash_hex = hex::encode(sighash);
+    let mut requests = Vec::with_capacity(required_spend_action_indices.len());
+    for action_index in required_spend_action_indices {
+        let a = pczt_bundle
+            .actions()
+            .get(*action_index as usize)
+            .ok_or(TxBuildError::PreparedTxPcztInvalid)?;
+        let spend = a.spend();
+        let alpha = spend
+            .alpha()
+            .as_ref()
+            .ok_or(TxBuildError::PreparedTxPcztInvalid)?;
+
+        requests.push(SigningRequestV0 {
+            sighash: sighash_hex.clone(),
+            action_index: *action_index,
+            alpha: hex::encode(alpha.to_repr()),
+            rk: hex::encode(<[u8; 32]>::from(spend.rk())),
+        });
+    }
+    Ok(SigningRequestsV0 {
+        version: EXT_V0.to_string(),
+        requests,
+    })
+}
+
+fn ext_prepare(req: ExtPrepareRequest) -> Result<(PreparedTxV0, SigningRequestsV0), TxBuildError> {
+    let ExtPrepareRequest {
+        ufvk,
+        coin_type,
+        account,
+        branch_id,
+        expiry_height,
+        anchor,
+        outputs,
+        fee_zat,
+        change_address,
+        notes,
+    } = req;
+
+    if coin_type >= BIP32_HARDENED_KEY_LIMIT {
+        return Err(TxBuildError::CoinTypeInvalid);
+    }
+    if account >= BIP32_HARDENED_KEY_LIMIT {
+        return Err(TxBuildError::AccountInvalid);
+    }
+
+    let branch_id = parse_branch_id(branch_id)?;
+    if !matches!(branch_id, BranchId::Nu5 | BranchId::Nu6 | BranchId::Nu6_1) {
+        return Err(TxBuildError::BranchIDInvalid);
+    }
+    if expiry_height == 0 {
+        return Err(TxBuildError::ExpiryHeightInvalid);
+    }
+
+    let fee_u64 = parse_u64_decimal(&fee_zat)?;
+    let _ = Zatoshis::from_u64(fee_u64).map_err(|_| TxBuildError::FeeInvalid)?;
+
+    if outputs.is_empty() || outputs.len() > 200 {
+        return Err(TxBuildError::OutputsInvalid);
+    }
+    if notes.is_empty() || notes.len() > 200 {
+        return Err(TxBuildError::NotesInvalid);
+    }
+
+    let fvk = decode_fvk_from_ufvk(&ufvk)?;
+    let pivk_external = fvk.to_ivk(Scope::External).prepare();
+    let pivk_internal = fvk.to_ivk(Scope::Internal).prepare();
+
+    let anchor_bytes = parse_hex::<32>(&anchor, TxBuildError::AnchorInvalid)?;
+    let anchor_ct = Anchor::from_bytes(anchor_bytes);
+    if bool::from(anchor_ct.is_none()) {
+        return Err(TxBuildError::AnchorInvalid);
+    }
+    let anchor = anchor_ct.unwrap();
+
+    let change_addr = decode_orchard_address(&change_address)?;
+
+    let mut outputs_parsed = Vec::with_capacity(outputs.len());
+    let mut total_out: u64 = 0;
+    for o in &outputs {
+        let to_addr = decode_orchard_address(&o.to_address)?;
+        let amount = parse_u64_decimal(&o.amount_zat)?;
+        if amount == 0 {
+            return Err(TxBuildError::AmountInvalid);
+        }
+        total_out = total_out
+            .checked_add(amount)
+            .ok_or(TxBuildError::AmountInvalid)?;
+        let memo_bytes = memo_bytes_hex(o.memo_hex.as_deref())?;
+        outputs_parsed.push((to_addr, amount, memo_bytes));
+    }
+
+    let mut orchard_builder =
+        orchard::builder::Builder::new(orchard::builder::BundleType::DEFAULT, anchor);
+    let mut total_in: u64 = 0;
+
+    for n in &notes {
+        if n.path.len() != 32 {
+            return Err(TxBuildError::WitnessInvalid);
+        }
+
+        let nf_old_bytes = parse_hex::<32>(&n.action_nullifier, TxBuildError::NotesInvalid)?;
+        let nf_old_ct = orchard::note::Nullifier::from_bytes(&nf_old_bytes);
+        if bool::from(nf_old_ct.is_none()) {
+            return Err(TxBuildError::NotesInvalid);
+        }
+        let nf_old = nf_old_ct.unwrap();
+
+        let cmx_bytes = parse_hex::<32>(&n.cmx, TxBuildError::NotesInvalid)?;
+        let cmx_ct = ExtractedNoteCommitment::from_bytes(&cmx_bytes);
+        if bool::from(cmx_ct.is_none()) {
+            return Err(TxBuildError::NotesInvalid);
+        }
+        let cmx = cmx_ct.unwrap();
+
+        let epk_bytes = parse_hex::<32>(&n.ephemeral_key, TxBuildError::NotesInvalid)?;
+        let enc_bytes = parse_hex::<52>(&n.enc_ciphertext, TxBuildError::NotesInvalid)?;
+
+        let compact =
+            CompactAction::from_parts(nf_old, cmx, EphemeralKeyBytes(epk_bytes), enc_bytes);
+        let domain = OrchardDomain::for_compact_action(&compact);
+
+        let (note, _) = try_compact_note_decryption(&domain, &pivk_external, &compact)
+            .or_else(|| try_compact_note_decryption(&domain, &pivk_internal, &compact))
+            .ok_or(TxBuildError::NoteDecryptFailed)?;
+
+        total_in = total_in
+            .checked_add(note.value().inner())
+            .ok_or(TxBuildError::InsufficientFunds)?;
+
+        let path_elems: [MerkleHashOrchard; 32] = n
+            .path
+            .iter()
+            .map(|h| {
+                let b = parse_hex::<32>(h, TxBuildError::WitnessInvalid)?;
+                let ct = MerkleHashOrchard::from_bytes(&b);
+                if bool::from(ct.is_none()) {
+                    return Err(TxBuildError::WitnessInvalid);
+                }
+                Ok(ct.unwrap())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .try_into()
+            .map_err(|_| TxBuildError::WitnessInvalid)?;
+
+        let mp = MerklePath::from_parts(n.position, path_elems);
+        orchard_builder
+            .add_spend(fvk.clone(), note, mp)
+            .map_err(|_| TxBuildError::WitnessInvalid)?;
+    }
+
+    let needed = total_out
+        .checked_add(fee_u64)
+        .ok_or(TxBuildError::InsufficientFunds)?;
+    if total_in < needed {
+        return Err(TxBuildError::InsufficientFunds);
+    }
+    let change = total_in - needed;
+
+    let output_count = outputs_parsed.len() + if change > 0 { 1 } else { 0 };
+    let required_fee = required_fee_send(notes.len(), output_count)?;
+    if fee_u64 < required_fee.into_u64() {
+        return Err(TxBuildError::FeeInvalid);
+    }
+
+    for (to_addr, amount, memo_bytes) in outputs_parsed {
+        orchard_builder
+            .add_output(
+                Some(fvk.to_ovk(Scope::External)),
+                to_addr,
+                orchard::value::NoteValue::from_raw(amount),
+                memo_bytes,
+            )
+            .map_err(|_| TxBuildError::TxBuildFailed)?;
+    }
+
+    if change > 0 {
+        orchard_builder
+            .add_output(
+                Some(fvk.to_ovk(Scope::External)),
+                change_addr,
+                orchard::value::NoteValue::from_raw(change),
+                empty_memo(),
+            )
+            .map_err(|_| TxBuildError::TxBuildFailed)?;
+    }
+
+    let mut rng = OsRng;
+    let (mut pczt_bundle, meta) = orchard_builder
+        .build_for_pczt(&mut rng)
+        .map_err(|_| TxBuildError::TxBuildFailed)?;
+
+    let mut orchard_output_action_indices = Vec::with_capacity(outputs.len());
+    for i in 0..outputs.len() {
+        let idx = meta
+            .output_action_index(i)
+            .ok_or(TxBuildError::TxBuildFailed)?;
+        orchard_output_action_indices.push(idx as u32);
+    }
+    let orchard_change_action_index = if change > 0 {
+        let idx = meta
+            .output_action_index(outputs.len())
+            .ok_or(TxBuildError::TxBuildFailed)?;
+        Some(idx as u32)
+    } else {
+        None
+    };
+
+    let mut required_spend_action_indices = Vec::with_capacity(notes.len());
+    for i in 0..notes.len() {
+        let idx = meta
+            .spend_action_index(i)
+            .ok_or(TxBuildError::TxBuildFailed)?;
+        required_spend_action_indices.push(idx as u32);
+    }
+    required_spend_action_indices.sort_unstable();
+    required_spend_action_indices.dedup();
+    if required_spend_action_indices.len() != notes.len() {
+        return Err(TxBuildError::TxBuildFailed);
+    }
+
+    let sighash = shielded_sighash_for_orchard_pczt(branch_id, expiry_height, &pczt_bundle)?;
+    pczt_bundle
+        .finalize_io(sighash, &mut rng)
+        .map_err(|_| TxBuildError::TxBuildFailed)?;
+    pczt_bundle
+        .create_proof(orchard_proving_key(), &mut rng)
+        .map_err(|_| TxBuildError::TxBuildFailed)?;
+
+    let prepared_tx = PreparedTxV0 {
+        version: EXT_V0.to_string(),
+        branch_id: branch_id.into(),
+        expiry_height,
+        fee_zat: fee_u64.to_string(),
+        orchard_output_action_indices,
+        orchard_change_action_index,
+        orchard_required_spend_action_indices: required_spend_action_indices,
+        orchard_pczt: orchard_pczt_bundle_to_v0(&pczt_bundle),
+    };
+
+    let signing_requests = signing_requests_from_pczt_v0(
+        sighash,
+        &prepared_tx.orchard_required_spend_action_indices,
+        &pczt_bundle,
+    )?;
+
+    Ok((prepared_tx, signing_requests))
+}
+
+fn ext_finalize(req: ExtFinalizeRequest) -> Result<BuiltTx, TxBuildError> {
+    let ExtFinalizeRequest {
+        prepared_tx,
+        spend_auth_sigs,
+    } = req;
+
+    if prepared_tx.version != EXT_V0 {
+        return Err(TxBuildError::PreparedTxVersionUnsupported);
+    }
+    if spend_auth_sigs.version != EXT_V0 {
+        return Err(TxBuildError::SpendAuthSigsInvalid);
+    }
+
+    let branch_id = parse_branch_id(prepared_tx.branch_id)?;
+    if !matches!(branch_id, BranchId::Nu5 | BranchId::Nu6 | BranchId::Nu6_1) {
+        return Err(TxBuildError::BranchIDInvalid);
+    }
+    if prepared_tx.expiry_height == 0 {
+        return Err(TxBuildError::ExpiryHeightInvalid);
+    }
+
+    let fee_u64 = parse_u64_decimal(&prepared_tx.fee_zat)?;
+    let _ = Zatoshis::from_u64(fee_u64).map_err(|_| TxBuildError::FeeInvalid)?;
+
+    // Required spend action indices from `ext_prepare`.
+    let mut required = prepared_tx.orchard_required_spend_action_indices.clone();
+    required.sort_unstable();
+    required.dedup();
+    if required != prepared_tx.orchard_required_spend_action_indices {
+        return Err(TxBuildError::PreparedTxInvalid);
+    }
+
+    let action_count = prepared_tx.orchard_pczt.actions.len();
+    for idx in &required {
+        if (*idx as usize) >= action_count {
+            return Err(TxBuildError::PreparedTxInvalid);
+        }
+    }
+
+    let required_set = required.into_iter().collect::<std::collections::BTreeSet<_>>();
+
+    let mut injected_sigs = std::collections::BTreeMap::<u32, [u8; 64]>::new();
+    for s in &spend_auth_sigs.signatures {
+        if !required_set.contains(&s.action_index) {
+            return Err(TxBuildError::SpendAuthSigWrongAction);
+        }
+        let sig = parse_hex::<64>(&s.spend_auth_sig, TxBuildError::SpendAuthSigsInvalid)?;
+        if injected_sigs.insert(s.action_index, sig).is_some() {
+            return Err(TxBuildError::SpendAuthSigDuplicate);
+        }
+    }
+    for idx in &required_set {
+        if !injected_sigs.contains_key(idx) {
+            return Err(TxBuildError::SpendAuthSigMissing);
+        }
+    }
+
+    // Ensure required actions don't already contain a signature in the prepared tx.
+    for idx in &required_set {
+        let a = prepared_tx
+            .orchard_pczt
+            .actions
+            .get(*idx as usize)
+            .ok_or(TxBuildError::PreparedTxInvalid)?;
+        if a.spend.spend_auth_sig.is_some() {
+            return Err(TxBuildError::PreparedTxInvalid);
+        }
+    }
+
+    let pczt_bundle = orchard_pczt_bundle_from_v0(&prepared_tx.orchard_pczt, &injected_sigs)?;
+
+    let sighash =
+        shielded_sighash_for_orchard_pczt(branch_id, prepared_tx.expiry_height, &pczt_bundle)?;
+
+    let unbound = pczt_bundle
+        .extract::<zcash_protocol::value::ZatBalance>()
+        .map_err(|e| match e {
+            orchard::pczt::TxExtractorError::MissingSpendAuthSig => TxBuildError::SpendAuthSigMissing,
+            _ => TxBuildError::PreparedTxPcztInvalid,
+        })?
+        .ok_or(TxBuildError::PreparedTxPcztInvalid)?;
+
+    let mut rng = OsRng;
+    let orchard_bundle = unbound
+        .apply_binding_signature(sighash, &mut rng)
+        .ok_or(TxBuildError::SpendAuthSigInvalid)?;
+
+    let version = TxVersion::suggested_for_branch(branch_id);
+    let authorized = TransactionData::from_parts(
+        version,
+        branch_id,
+        0,
+        BlockHeight::from(prepared_tx.expiry_height),
+        None,
+        None,
+        None,
+        Some(orchard_bundle),
+    );
+    let tx = authorized
+        .freeze()
+        .map_err(|_| TxBuildError::TxBuildFailed)?;
+    let mut bytes = Vec::new();
+    tx.write(&mut bytes)
+        .map_err(|_| TxBuildError::TxBuildFailed)?;
+
+    Ok(BuiltTx {
+        txid: tx.txid().to_string(),
+        raw_tx_hex: hex::encode(bytes),
+        fee_zat: fee_u64.to_string(),
+        orchard_output_action_indices: prepared_tx.orchard_output_action_indices,
+        orchard_change_action_index: prepared_tx.orchard_change_action_index,
+    })
+}
+
 fn handle(req: TxRequest) -> Result<TxResponse, TxBuildError> {
     let built = match &req {
         TxRequest::Send { .. } => build_send(&req)?,
@@ -985,7 +1759,105 @@ pub extern "C" fn juno_tx_build_tx_json(req_json: *const c_char) -> *mut c_char 
     }
 }
 
-/// Frees a string returned by `juno_tx_build_tx_json`.
+/// Builds a prepared transaction and signing requests for external spend-auth signing.
+///
+/// The returned pointer must be freed with `juno_tx_string_free`.
+#[no_mangle]
+pub extern "C" fn juno_tx_ext_prepare_json(req_json: *const c_char) -> *mut c_char {
+    fn to_c_string(v: ExtPrepareResponse) -> *mut c_char {
+        let json = serde_json::to_string(&v)
+            .unwrap_or_else(|_| r#"{"status":"err","error":"serde_failed"}"#.to_string());
+        std::ffi::CString::new(json).expect("json").into_raw()
+    }
+
+    let res = std::panic::catch_unwind(|| {
+        if req_json.is_null() {
+            return ExtPrepareResponse::Err {
+                error: TxBuildError::ReqJSONNull.to_string(),
+            };
+        }
+
+        let s = unsafe { std::ffi::CStr::from_ptr(req_json) }.to_string_lossy();
+        let parsed: ExtPrepareRequest = match serde_json::from_str(&s) {
+            Ok(v) => v,
+            Err(_) => {
+                return ExtPrepareResponse::Err {
+                    error: TxBuildError::InvalidJSON.to_string(),
+                };
+            }
+        };
+
+        match ext_prepare(parsed) {
+            Ok((prepared_tx, signing_requests)) => ExtPrepareResponse::Ok {
+                prepared_tx,
+                signing_requests,
+            },
+            Err(e) => ExtPrepareResponse::Err {
+                error: e.to_string(),
+            },
+        }
+    });
+
+    match res {
+        Ok(v) => to_c_string(v),
+        Err(_) => to_c_string(ExtPrepareResponse::Err {
+            error: TxBuildError::Panic.to_string(),
+        }),
+    }
+}
+
+/// Finalizes a prepared transaction with externally-produced spend-auth signatures.
+///
+/// The returned pointer must be freed with `juno_tx_string_free`.
+#[no_mangle]
+pub extern "C" fn juno_tx_ext_finalize_json(req_json: *const c_char) -> *mut c_char {
+    fn to_c_string(v: TxResponse) -> *mut c_char {
+        let json = serde_json::to_string(&v)
+            .unwrap_or_else(|_| r#"{"status":"err","error":"serde_failed"}"#.to_string());
+        std::ffi::CString::new(json).expect("json").into_raw()
+    }
+
+    let res = std::panic::catch_unwind(|| {
+        if req_json.is_null() {
+            return TxResponse::Err {
+                error: TxBuildError::ReqJSONNull.to_string(),
+            };
+        }
+
+        let s = unsafe { std::ffi::CStr::from_ptr(req_json) }.to_string_lossy();
+        let parsed: ExtFinalizeRequest = match serde_json::from_str(&s) {
+            Ok(v) => v,
+            Err(_) => {
+                return TxResponse::Err {
+                    error: TxBuildError::InvalidJSON.to_string(),
+                };
+            }
+        };
+
+        match ext_finalize(parsed) {
+            Ok(built) => TxResponse::Ok {
+                txid: built.txid,
+                raw_tx_hex: built.raw_tx_hex,
+                fee_zat: built.fee_zat,
+                orchard_output_action_indices: built.orchard_output_action_indices,
+                orchard_change_action_index: built.orchard_change_action_index,
+            },
+            Err(e) => TxResponse::Err {
+                error: e.to_string(),
+            },
+        }
+    });
+
+    match res {
+        Ok(v) => to_c_string(v),
+        Err(_) => to_c_string(TxResponse::Err {
+            error: TxBuildError::Panic.to_string(),
+        }),
+    }
+}
+
+/// Frees a string returned by `juno_tx_build_tx_json`, `juno_tx_ext_prepare_json`, or
+/// `juno_tx_ext_finalize_json`.
 #[no_mangle]
 pub extern "C" fn juno_tx_string_free(s: *mut c_char) {
     if s.is_null() {
@@ -993,5 +1865,239 @@ pub extern "C" fn juno_tx_string_free(s: *mut c_char) {
     }
     unsafe {
         drop(std::ffi::CString::from_raw(s));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use rand::{RngCore as _, SeedableRng as _};
+    use zip32::AccountId;
+
+    fn fvk_and_ufvk(hrp: &str) -> (FullViewingKey, String) {
+        let seed = [7u8; 64];
+        let account = AccountId::try_from(0).expect("account");
+        let sk =
+            SpendingKey::from_zip32_seed(&seed, JUNO_COIN_TYPE_MAINNET, account).expect("sk");
+        let fvk = FullViewingKey::from(&sk);
+        let ufvk =
+            zip316::encode_unified_container(hrp, TYPECODE_ORCHARD, &fvk.to_bytes()).expect("ufvk");
+        (fvk, ufvk)
+    }
+
+    #[test]
+    fn ufvk_parsing_rejects_wrong_hrp() {
+        let (_fvk, ufvk) = fvk_and_ufvk("jviewwrong");
+        match decode_fvk_from_ufvk(&ufvk) {
+            Err(TxBuildError::UfvkHrpMismatch) => {}
+            other => panic!("expected hrp mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ufvk_parsing_rejects_wrong_tlv_type() {
+        let (fvk, _ufvk) = fvk_and_ufvk(HRP_JUNO_UFVK_MAIN);
+        let wrong =
+            zip316::encode_unified_container(HRP_JUNO_UFVK_MAIN, 0x04, &fvk.to_bytes()).expect("ufvk");
+        match decode_fvk_from_ufvk(&wrong) {
+            Err(TxBuildError::UfvkTypecodeUnsupported) => {}
+            other => panic!("expected typecode unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ufvk_parsing_rejects_wrong_value_len() {
+        let (fvk, _ufvk) = fvk_and_ufvk(HRP_JUNO_UFVK_MAIN);
+        let bytes = fvk.to_bytes();
+        let wrong_len =
+            zip316::encode_unified_container(HRP_JUNO_UFVK_MAIN, TYPECODE_ORCHARD, &bytes[..95])
+                .expect("ufvk");
+        match decode_fvk_from_ufvk(&wrong_len) {
+            Err(TxBuildError::UfvkValueLenInvalid) => {}
+            other => panic!("expected value len invalid, got {other:?}"),
+        }
+    }
+
+    fn test_pczt_one_spend_one_output() -> (orchard::pczt::Bundle, Vec<u32>, SpendAuthorizingKey, [u8; 32]) {
+        let seed = [9u8; 64];
+        let account = AccountId::try_from(0).expect("account");
+        let sk =
+            SpendingKey::from_zip32_seed(&seed, JUNO_COIN_TYPE_MAINNET, account).expect("sk");
+        let fvk = FullViewingKey::from(&sk);
+        let ask = SpendAuthorizingKey::from(&sk);
+        let recipient = fvk.address_at(0u32, Scope::External);
+
+        // Construct a spendable note for this FVK.
+        let rho_bytes = Anchor::empty_tree().to_bytes();
+        let rho = orchard::note::Rho::from_bytes(&rho_bytes)
+            .into_option()
+            .expect("rho");
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let rseed = loop {
+            let mut b = [0u8; 32];
+            rng.fill_bytes(&mut b);
+            if let Some(r) = orchard::note::RandomSeed::from_bytes(b, &rho).into_option() {
+                break r;
+            }
+        };
+
+        let note_value = orchard::value::NoteValue::from_raw(100_000);
+        let note = orchard::Note::from_parts(recipient, note_value, rho, rseed)
+            .into_option()
+            .expect("note");
+
+        let cmx: ExtractedNoteCommitment = note.commitment().into();
+
+        // Create a Merkle path with a deterministic anchor.
+        let sibling = MerkleHashOrchard::from_bytes(&rho_bytes)
+            .into_option()
+            .expect("sibling");
+        let mp = MerklePath::from_parts(0, [sibling; 32]);
+        let anchor = mp.root(cmx);
+
+        let mut builder =
+            orchard::builder::Builder::new(orchard::builder::BundleType::DEFAULT, anchor);
+        builder
+            .add_spend(fvk.clone(), note, mp)
+            .expect("add_spend");
+
+        // Spend 100_000, output 90_000, leaving a 10_000 fee.
+        builder
+            .add_output(
+                Some(fvk.to_ovk(Scope::External)),
+                recipient,
+                orchard::value::NoteValue::from_raw(90_000),
+                empty_memo(),
+            )
+            .expect("add_output");
+
+        let (mut pczt_bundle, meta) = builder.build_for_pczt(&mut rng).expect("build_for_pczt");
+
+        let spend_action_index = meta.spend_action_index(0).expect("spend index") as u32;
+        let required = vec![spend_action_index];
+
+        let branch_id = BranchId::Nu5;
+        let expiry_height = 1u32;
+        let sighash = shielded_sighash_for_orchard_pczt(branch_id, expiry_height, &pczt_bundle)
+            .expect("sighash");
+        pczt_bundle
+            .finalize_io(sighash, &mut rng)
+            .expect("finalize_io");
+
+        (pczt_bundle, required, ask, sighash)
+    }
+
+    #[test]
+    fn prepare_produces_correct_number_of_signing_requests() {
+        let (pczt_bundle, required, _ask, sighash) = test_pczt_one_spend_one_output();
+        let signing_requests =
+            signing_requests_from_pczt_v0(sighash, &required, &pczt_bundle).expect("requests");
+        assert_eq!(signing_requests.version, EXT_V0);
+        assert_eq!(signing_requests.requests.len(), required.len());
+        assert_eq!(signing_requests.requests[0].action_index, required[0]);
+    }
+
+    #[test]
+    fn finalize_rejects_missing_signatures() {
+        let (pczt_bundle, required, _ask, _sighash) = test_pczt_one_spend_one_output();
+        let mut orchard_pczt = orchard_pczt_bundle_to_v0(&pczt_bundle);
+        orchard_pczt.zkproof = Some("00".to_string());
+
+        let req = ExtFinalizeRequest {
+            prepared_tx: PreparedTxV0 {
+                version: EXT_V0.to_string(),
+                branch_id: BranchId::Nu5.into(),
+                expiry_height: 1,
+                fee_zat: "10000".to_string(),
+                orchard_output_action_indices: vec![0],
+                orchard_change_action_index: None,
+                orchard_required_spend_action_indices: required,
+                orchard_pczt,
+            },
+            spend_auth_sigs: SpendAuthSigSubmissionV0 {
+                version: EXT_V0.to_string(),
+                signatures: vec![],
+            },
+        };
+
+        match ext_finalize(req) {
+            Err(TxBuildError::SpendAuthSigMissing) => {}
+            other => panic!("expected missing sig error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_rejects_duplicate_signatures() {
+        let (pczt_bundle, required, _ask, _sighash) = test_pczt_one_spend_one_output();
+        let mut orchard_pczt = orchard_pczt_bundle_to_v0(&pczt_bundle);
+        orchard_pczt.zkproof = Some("00".to_string());
+
+        let sig_hex = "00".repeat(64);
+        let req = ExtFinalizeRequest {
+            prepared_tx: PreparedTxV0 {
+                version: EXT_V0.to_string(),
+                branch_id: BranchId::Nu5.into(),
+                expiry_height: 1,
+                fee_zat: "10000".to_string(),
+                orchard_output_action_indices: vec![0],
+                orchard_change_action_index: None,
+                orchard_required_spend_action_indices: required.clone(),
+                orchard_pczt,
+            },
+            spend_auth_sigs: SpendAuthSigSubmissionV0 {
+                version: EXT_V0.to_string(),
+                signatures: vec![
+                    SpendAuthSigV0 {
+                        action_index: required[0],
+                        spend_auth_sig: sig_hex.clone(),
+                    },
+                    SpendAuthSigV0 {
+                        action_index: required[0],
+                        spend_auth_sig: sig_hex,
+                    },
+                ],
+            },
+        };
+
+        match ext_finalize(req) {
+            Err(TxBuildError::SpendAuthSigDuplicate) => {}
+            other => panic!("expected duplicate sig error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finalize_rejects_invalid_signature() {
+        let (pczt_bundle, required, _ask, _sighash) = test_pczt_one_spend_one_output();
+        let mut orchard_pczt = orchard_pczt_bundle_to_v0(&pczt_bundle);
+        orchard_pczt.zkproof = Some("00".to_string());
+
+        // A correctly sized but invalid signature should fail signature verification.
+        let sig_hex = "00".repeat(64);
+        let req = ExtFinalizeRequest {
+            prepared_tx: PreparedTxV0 {
+                version: EXT_V0.to_string(),
+                branch_id: BranchId::Nu5.into(),
+                expiry_height: 1,
+                fee_zat: "10000".to_string(),
+                orchard_output_action_indices: vec![0],
+                orchard_change_action_index: None,
+                orchard_required_spend_action_indices: required.clone(),
+                orchard_pczt,
+            },
+            spend_auth_sigs: SpendAuthSigSubmissionV0 {
+                version: EXT_V0.to_string(),
+                signatures: vec![SpendAuthSigV0 {
+                    action_index: required[0],
+                    spend_auth_sig: sig_hex,
+                }],
+            },
+        };
+
+        match ext_finalize(req) {
+            Err(TxBuildError::SpendAuthSigInvalid) => {}
+            other => panic!("expected invalid sig error, got {other:?}"),
+        }
     }
 }

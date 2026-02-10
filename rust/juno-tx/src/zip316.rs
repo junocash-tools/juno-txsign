@@ -1,5 +1,7 @@
 use bech32::primitives::checksum::Checksum;
 use bech32::primitives::decode::CheckedHrpstring;
+#[cfg(test)]
+use bech32::Hrp;
 use thiserror::Error;
 
 const BECH32_GEN: [u32; 5] = [
@@ -26,6 +28,20 @@ const PADDING_LEN: usize = 16;
 
 #[derive(Debug, Error)]
 pub enum Zip316Error {
+    // Encoding-specific errors are only used in tests. In production, this crate only
+    // needs decoding support.
+    #[cfg(test)]
+    #[error("hrp_too_long")]
+    HrpTooLong,
+    #[cfg(test)]
+    #[error("invalid_hrp")]
+    InvalidHrp,
+    #[cfg(test)]
+    #[error("payload_too_short")]
+    PayloadTooShort,
+    #[cfg(test)]
+    #[error("bech32_encode_failed")]
+    Bech32EncodeFailed,
     #[error("bech32_decode_failed")]
     Bech32DecodeFailed,
     #[error("hrp_mismatch")]
@@ -38,6 +54,29 @@ pub enum Zip316Error {
     TlvInvalid,
     #[error("tlv_trailing_bytes")]
     TlvTrailingBytes,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub struct Tlv<'a> {
+    pub typecode: u64,
+    pub value: &'a [u8],
+}
+
+#[cfg(test)]
+fn write_compact_size(n: u64, out: &mut Vec<u8>) {
+    if n <= 252 {
+        out.push(n as u8);
+    } else if n <= u16::MAX as u64 {
+        out.push(253u8);
+        out.extend_from_slice(&(n as u16).to_le_bytes());
+    } else if n <= u32::MAX as u64 {
+        out.push(254u8);
+        out.extend_from_slice(&(n as u32).to_le_bytes());
+    } else {
+        out.push(255u8);
+        out.extend_from_slice(&n.to_le_bytes());
+    }
 }
 
 fn read_compact_size(input: &mut &[u8]) -> Result<u64, Zip316Error> {
@@ -75,6 +114,29 @@ fn read_compact_size(input: &mut &[u8]) -> Result<u64, Zip316Error> {
     }
 }
 
+#[cfg(test)]
+fn encode_zip316_bech32m(hrp: &str, raw_items_tlv: &[u8]) -> Result<String, Zip316Error> {
+    if hrp.len() > PADDING_LEN {
+        return Err(Zip316Error::HrpTooLong);
+    }
+    // f4jumble requires (payload + padding) length >= 48.
+    if raw_items_tlv.len() + PADDING_LEN < 48 {
+        return Err(Zip316Error::PayloadTooShort);
+    }
+
+    let mut padded = Vec::with_capacity(raw_items_tlv.len() + PADDING_LEN);
+    padded.extend_from_slice(raw_items_tlv);
+
+    let mut padding = [0u8; PADDING_LEN];
+    padding[..hrp.len()].copy_from_slice(hrp.as_bytes());
+    padded.extend_from_slice(&padding);
+
+    let jumbled = f4jumble::f4jumble(&padded).map_err(|_| Zip316Error::F4JumbleFailed)?;
+
+    let hrp = Hrp::parse(hrp).map_err(|_| Zip316Error::InvalidHrp)?;
+    bech32::encode::<Bech32mUnlimited>(hrp, &jumbled).map_err(|_| Zip316Error::Bech32EncodeFailed)
+}
+
 fn decode_zip316_bech32m(hrp_expected: &str, s: &str) -> Result<Vec<u8>, Zip316Error> {
     let checked = CheckedHrpstring::new::<Bech32mUnlimited>(s)
         .map_err(|_| Zip316Error::Bech32DecodeFailed)?;
@@ -101,20 +163,50 @@ fn decode_zip316_bech32m(hrp_expected: &str, s: &str) -> Result<Vec<u8>, Zip316E
     Ok(bytes)
 }
 
+#[cfg(test)]
+pub fn encode_tlv_container(hrp: &str, items: &[Tlv<'_>]) -> Result<String, Zip316Error> {
+    let mut payload = Vec::new();
+    for item in items {
+        write_compact_size(item.typecode, &mut payload);
+        write_compact_size(item.value.len() as u64, &mut payload);
+        payload.extend_from_slice(item.value);
+    }
+    encode_zip316_bech32m(hrp, &payload)
+}
+
+#[cfg(test)]
+pub fn encode_unified_container(hrp: &str, typecode: u64, value: &[u8]) -> Result<String, Zip316Error> {
+    let items = [Tlv { typecode, value }];
+    encode_tlv_container(hrp, &items)
+}
+
+pub(crate) fn decode_tlv_container(
+    hrp_expected: &str,
+    s: &str,
+) -> Result<Vec<(u64, Vec<u8>)>, Zip316Error> {
+    let bytes = decode_zip316_bech32m(hrp_expected, s)?;
+    let mut rest = bytes.as_slice();
+    let mut out = Vec::new();
+    while !rest.is_empty() {
+        let typecode = read_compact_size(&mut rest)?;
+        let len = read_compact_size(&mut rest)? as usize;
+        if rest.len() < len {
+            return Err(Zip316Error::TlvInvalid);
+        }
+        let (value, next) = rest.split_at(len);
+        out.push((typecode, value.to_vec()));
+        rest = next;
+    }
+    Ok(out)
+}
+
 pub(crate) fn decode_single_tlv_container(
     hrp_expected: &str,
     s: &str,
 ) -> Result<(u64, Vec<u8>), Zip316Error> {
-    let bytes = decode_zip316_bech32m(hrp_expected, s)?;
-    let mut rest = bytes.as_slice();
-    let typecode = read_compact_size(&mut rest)?;
-    let len = read_compact_size(&mut rest)? as usize;
-    if rest.len() != len {
-        return Err(if rest.len() < len {
-            Zip316Error::TlvInvalid
-        } else {
-            Zip316Error::TlvTrailingBytes
-        });
+    let items = decode_tlv_container(hrp_expected, s)?;
+    if items.len() != 1 {
+        return Err(Zip316Error::TlvTrailingBytes);
     }
-    Ok((typecode, rest.to_vec()))
+    Ok(items.into_iter().next().expect("len checked"))
 }

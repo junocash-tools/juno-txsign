@@ -25,6 +25,7 @@ rust-test:
 	cargo test --manifest-path $(RUST_MANIFEST_WITNESS)
 
 test-unit:
+	$(MAKE) rust-test
 	CGO_ENABLED=0 go test $(TESTFLAGS) ./internal/plan ./internal/cliout
 
 test-integration:
