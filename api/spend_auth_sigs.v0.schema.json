@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SpendAuthSigSubmission v0",
+  "type": "object",
+  "required": ["version", "signatures"],
+  "properties": {
+    "version": { "const": "v0" },
+    "signatures": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/SpendAuthSigV0" }
+    }
+  },
+  "$defs": {
+    "Hex64": { "type": "string", "pattern": "^[0-9a-fA-F]{128}$" },
+    "SpendAuthSigV0": {
+      "type": "object",
+      "required": ["action_index", "spend_auth_sig"],
+      "properties": {
+        "action_index": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "spend_auth_sig": { "$ref": "#/$defs/Hex64" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

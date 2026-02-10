@@ -10,7 +10,12 @@ Supports multi-output plans and produces a raw transaction hex blob suitable for
 
 - Input `TxPlan` is versioned via `txplan.version` (currently `"v0"`). Unsupported versions are rejected.
 - For automation/integrations, treat JSON as the stable API surface (`--json` and `--out`). Human-oriented output may change.
-- Schema: `api/txplan.v0.schema.json`
+- Schemas:
+  - `api/txplan.v0.schema.json`
+  - External signing mode:
+    - `api/prepared_tx.v0.schema.json`
+    - `api/signing_requests.v0.schema.json`
+    - `api/spend_auth_sigs.v0.schema.json`
 
 ## CLI
 
@@ -25,6 +30,17 @@ Sign a plan from stdin and write raw tx hex to a file (mode `0600`):
 Machine-readable output:
 
 - add `--json`
+
+### External signing mode (Orchard spend-auth TSS)
+
+This mode does not require a seed/spending key. It builds a proven Orchard transaction using a UFVK (`jview...`) and returns per-action signing inputs for external spend-auth signing.
+
+Two-phase flow:
+
+1. Prepare a transaction and get signing requests:
+   - `juno-txsign ext-prepare --txplan ./txplan.json --ufvk <jview...> --out-prepared ./prepared.json --out-requests ./requests.json`
+2. Finalize with externally-produced spend-auth signatures:
+   - `juno-txsign ext-finalize --prepared-tx ./prepared.json --sigs ./sigs.json --out ./rawtx.hex`
 
 Run `juno-txsign --help` for the complete flag reference.
 
@@ -55,6 +71,14 @@ export LD_LIBRARY_PATH="$PWD/rust/juno-tx/target/release:$PWD/rust/witness/targe
       - `orchard_output_action_indices`: array of Orchard action indices aligned to `txplan.outputs` order
       - `orchard_change_action_index`: Orchard action index for the change output, or `null` if no change output was created
   - error: `{"version":"v1","status":"err","error":{"code":"...","message":"..."}}`
+
+### External signing mode JSON
+
+- `ext-prepare` output (always JSON):
+  - success: `{"version":"v1","status":"ok","data":{"prepared_tx":<PreparedTx>,"signing_requests":<SigningRequests>}}`
+- `ext-finalize` output:
+  - default stdout: raw tx hex (one line)
+  - with `--json`: same envelope as `sign` (includes `txid`, `raw_tx_hex`, `fee_zat`, and optional Orchard action indices)
 
 ## Fees
 

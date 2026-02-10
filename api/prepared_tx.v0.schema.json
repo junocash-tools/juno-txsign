@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PreparedTx v0",
+  "type": "object",
+  "required": [
+    "version",
+    "branch_id",
+    "expiry_height",
+    "fee_zat",
+    "orchard_output_action_indices",
+    "orchard_change_action_index",
+    "orchard_required_spend_action_indices",
+    "orchard_pczt"
+  ],
+  "properties": {
+    "version": { "const": "v0" },
+    "branch_id": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "expiry_height": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "fee_zat": { "type": "string", "pattern": "^[0-9]+$" },
+    "orchard_output_action_indices": {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+    },
+    "orchard_change_action_index": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "orchard_required_spend_action_indices": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+    },
+    "orchard_pczt": { "$ref": "#/$defs/OrchardPcztBundleV0" }
+  },
+  "$defs": {
+    "Hex32": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "Hex64": { "type": "string", "pattern": "^[0-9a-fA-F]{128}$" },
+    "HexBytes": { "type": "string", "pattern": "^(?:[0-9a-fA-F]{2})*$" },
+    "OrchardPcztBundleV0": {
+      "type": "object",
+      "required": ["actions", "flags", "value_sum", "anchor", "zkproof", "bsk"],
+      "properties": {
+        "actions": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "$ref": "#/$defs/OrchardPcztActionV0" }
+        },
+        "flags": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "value_sum": { "$ref": "#/$defs/OrchardValueSumV0" },
+        "anchor": { "$ref": "#/$defs/Hex32" },
+        "zkproof": { "type": ["string", "null"], "pattern": "^(?:[0-9a-fA-F]{2})*$" },
+        "bsk": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "OrchardValueSumV0": {
+      "type": "object",
+      "required": ["magnitude", "is_negative"],
+      "properties": {
+        "magnitude": { "type": "integer", "minimum": 0 },
+        "is_negative": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "OrchardPcztActionV0": {
+      "type": "object",
+      "required": ["cv_net", "spend", "output"],
+      "properties": {
+        "cv_net": { "$ref": "#/$defs/Hex32" },
+        "spend": { "$ref": "#/$defs/OrchardPcztSpendV0" },
+        "output": { "$ref": "#/$defs/OrchardPcztOutputV0" }
+      },
+      "additionalProperties": false
+    },
+    "OrchardPcztSpendV0": {
+      "type": "object",
+      "required": ["nullifier", "rk", "spend_auth_sig", "alpha"],
+      "properties": {
+        "nullifier": { "$ref": "#/$defs/Hex32" },
+        "rk": { "$ref": "#/$defs/Hex32" },
+        "spend_auth_sig": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{128}$" },
+        "alpha": { "type": ["string", "null"], "pattern": "^[0-9a-fA-F]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "OrchardPcztOutputV0": {
+      "type": "object",
+      "required": ["cmx", "ephemeral_key", "enc_ciphertext", "out_ciphertext"],
+      "properties": {
+        "cmx": { "$ref": "#/$defs/Hex32" },
+        "ephemeral_key": { "$ref": "#/$defs/Hex32" },
+        "enc_ciphertext": { "type": "string", "pattern": "^[0-9a-fA-F]{1160}$" },
+        "out_ciphertext": { "type": "string", "pattern": "^[0-9a-fA-F]{160}$" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
+

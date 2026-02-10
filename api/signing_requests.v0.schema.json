@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SigningRequests v0",
+  "type": "object",
+  "required": ["version", "requests"],
+  "properties": {
+    "version": { "const": "v0" },
+    "requests": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/SigningRequestV0" }
+    }
+  },
+  "$defs": {
+    "Hex32": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "SigningRequestV0": {
+      "type": "object",
+      "required": ["sighash", "action_index", "alpha", "rk"],
+      "properties": {
+        "sighash": { "$ref": "#/$defs/Hex32" },
+        "action_index": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "alpha": { "$ref": "#/$defs/Hex32" },
+        "rk": { "$ref": "#/$defs/Hex32" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
