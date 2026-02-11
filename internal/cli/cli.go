@@ -14,6 +14,7 @@ import (
 
 	"github.com/Abdullah1738/juno-sdk-go/types"
 	"github.com/Abdullah1738/juno-txsign/internal/cliout"
+	"github.com/Abdullah1738/juno-txsign/internal/digestsign"
 	"github.com/Abdullah1738/juno-txsign/pkg/txsign"
 )
 
@@ -35,6 +36,8 @@ func RunWithIO(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "sign":
 		return runSign(args[1:], stdout, stderr)
+	case "sign-digest":
+		return runSignDigest(args[1:], stdout, stderr)
 	case "ext-prepare":
 		return runExtPrepare(args[1:], stdout, stderr)
 	case "ext-finalize":
@@ -53,12 +56,14 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  juno-txsign sign --txplan <path|-> --seed-base64 <b64> [--out <path>] [--json] [--action-indices]")
+	fmt.Fprintln(w, "  juno-txsign sign-digest --digest <0x32-byte-hex> --json")
 	fmt.Fprintln(w, "  juno-txsign ext-prepare --txplan <path|-> --ufvk <jview...> [--out-prepared <path>] [--out-requests <path>]")
 	fmt.Fprintln(w, "  juno-txsign ext-finalize --prepared-tx <path> --sigs <path> [--out <path>] [--json] [--action-indices]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Notes:")
 	fmt.Fprintln(w, "  - This command performs no network calls.")
 	fmt.Fprintln(w, "  - Do not log or store seeds/spending keys.")
+	fmt.Fprintln(w, "  - sign-digest reads signer keys from JUNO_TXSIGN_SIGNER_KEYS (comma-separated 32-byte hex keys).")
 }
 
 func runSign(args []string, stdout, stderr io.Writer) int {
@@ -300,6 +305,85 @@ func runExtPrepare(args []string, stdout, stderr io.Writer) int {
 		},
 	})
 	return 0
+}
+
+func runSignDigest(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("sign-digest", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	var digestHex string
+	var jsonOut bool
+
+	fs.StringVar(&digestHex, "digest", "", "final EIP-712 digest (0x-prefixed 32-byte hex)")
+	fs.BoolVar(&jsonOut, "json", false, "JSON output (required)")
+
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+
+	if !jsonOut {
+		fmt.Fprintln(stderr, "--json is required")
+		return 2
+	}
+
+	digestHex = strings.TrimSpace(digestHex)
+	if digestHex == "" {
+		return writeSignDigestErr(stdout, "invalid_request", "digest is required", 2)
+	}
+
+	digest, err := digestsign.ParseDigestHex(digestHex)
+	if err != nil {
+		return writeSignDigestErr(stdout, "invalid_request", err.Error(), 1)
+	}
+
+	keys, err := digestsign.LoadSignerKeysFromEnv()
+	if err != nil {
+		return writeSignDigestErr(stdout, "sign_failed", err.Error(), 1)
+	}
+
+	sigs, err := digestsign.SignDigest(digest, keys)
+	if err != nil {
+		return writeSignDigestErr(stdout, "sign_failed", err.Error(), 1)
+	}
+
+	type signDigestData struct {
+		Signatures []string `json:"signatures"`
+	}
+	type signDigestOK struct {
+		Version string         `json:"version"`
+		Status  string         `json:"status"`
+		Data    signDigestData `json:"data"`
+	}
+	_ = json.NewEncoder(stdout).Encode(signDigestOK{
+		Version: jsonVersionV1,
+		Status:  "ok",
+		Data: signDigestData{
+			Signatures: sigs,
+		},
+	})
+	return 0
+}
+
+func writeSignDigestErr(stdout io.Writer, code, msg string, exitCode int) int {
+	type errBody struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	type signDigestErr struct {
+		Version string  `json:"version"`
+		Status  string  `json:"status"`
+		Error   errBody `json:"error"`
+	}
+	_ = json.NewEncoder(stdout).Encode(signDigestErr{
+		Version: jsonVersionV1,
+		Status:  "err",
+		Error: errBody{
+			Code:    code,
+			Message: msg,
+		},
+	})
+	return exitCode
 }
 
 func runExtFinalize(args []string, stdout, stderr io.Writer) int {
