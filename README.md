@@ -31,6 +31,14 @@ Machine-readable output:
 
 - add `--json`
 
+### Digest signing mode (Bridge / EIP-712 digest)
+
+Sign a final 32-byte EIP-712 digest (no prefixing/re-hashing):
+
+- `JUNO_TXSIGN_SIGNER_KEYS=<hex1>,<hex2> juno-txsign sign-digest --digest 0x<64-hex> --json`
+
+`sign-digest` reads signer keys from `JUNO_TXSIGN_SIGNER_KEYS` as a comma-separated list of secp256k1 private keys (32-byte hex, optional `0x` prefixes).
+
 ### External signing mode (Orchard spend-auth TSS)
 
 This mode does not require a seed/spending key. It builds a proven Orchard transaction using a UFVK (`jview...`) and returns per-action signing inputs for external spend-auth signing.
@@ -79,6 +87,13 @@ export LD_LIBRARY_PATH="$PWD/rust/juno-tx/target/release:$PWD/rust/witness/targe
 - `ext-finalize` output:
   - default stdout: raw tx hex (one line)
   - with `--json`: same envelope as `sign` (includes `txid`, `raw_tx_hex`, `fee_zat`, and optional Orchard action indices)
+
+### sign-digest JSON
+
+- success: `{"version":"v1","status":"ok","data":{"signatures":["0x<65-byte-sig>", "..."]}}`
+- error: `{"version":"v1","status":"err","error":{"code":"<machine_code>","message":"<human_message>"}}`
+
+For `sign-digest`, each signature is `r || s || v` (65 bytes), with `v` in `{27,28}` and canonical low-`s`. Output signatures are sorted by recovered signer address ascending and guaranteed unique.
 
 ## Fees
 
