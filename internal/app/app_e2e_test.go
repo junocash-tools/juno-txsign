@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/Abdullah1738/juno-sdk-go/types"
-	"github.com/Abdullah1738/juno-txsign/internal/testutil/containers"
 	"github.com/Abdullah1738/juno-txsign/internal/testutil/junocashdutil"
 )
 
@@ -115,18 +114,7 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 			t.Fatalf("txid mismatch")
 		}
 
-		if err := mineOne(ctx, jd); err != nil {
-			t.Fatalf("mine: %v", err)
-		}
-
-		var height int64
-		if err := rpc.Call(ctx, "getblockcount", nil, &height); err != nil {
-			t.Fatalf("getblockcount: %v", err)
-		}
-		hash, err := rpc.GetBlockHash(ctx, height)
-		if err != nil {
-			t.Fatalf("getblockhash: %v", err)
-		}
+		hash := mineUntilTxConfirmed(t, rpc, jd, res.TxID)
 
 		var blk struct {
 			Tx []string `json:"tx"`
@@ -233,9 +221,4 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 			t.Fatalf("expected no change output")
 		}
 	})
-}
-
-func mineOne(ctx context.Context, jd *containers.Junocashd) error {
-	_, err := jd.ExecCLI(ctx, "generate", "1")
-	return err
 }

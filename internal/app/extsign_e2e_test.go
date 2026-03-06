@@ -153,18 +153,7 @@ ok:
 		t.Fatalf("txid mismatch")
 	}
 
-	if err := mineOne(ctx, jd); err != nil {
-		t.Fatalf("mine: %v", err)
-	}
-
-	var height int64
-	if err := rpc.Call(ctx, "getblockcount", nil, &height); err != nil {
-		t.Fatalf("getblockcount: %v", err)
-	}
-	hash, err := rpc.GetBlockHash(ctx, height)
-	if err != nil {
-		t.Fatalf("getblockhash: %v", err)
-	}
+	hash := mineUntilTxConfirmed(t, rpc, jd, res.TxID)
 
 	var blk struct {
 		Tx []string `json:"tx"`

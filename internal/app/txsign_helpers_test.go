@@ -79,6 +79,11 @@ func mineAndShieldOnce(t *testing.T, jd *containers.Junocashd, orchardAddr strin
 	waitSpendableOrchardNote(t, jd)
 }
 
+func mineOne(ctx context.Context, jd *containers.Junocashd) error {
+	_, err := jd.ExecCLI(ctx, "generate", "1")
+	return err
+}
+
 func waitWalletTx(t *testing.T, jd *containers.Junocashd, txid string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -100,6 +105,48 @@ func waitWalletTx(t *testing.T, jd *containers.Junocashd, txid string) {
 		case <-ticker.C:
 		}
 	}
+}
+
+func mineUntilTxConfirmed(t *testing.T, rpc *junocashd.Client, jd *containers.Junocashd, txid string) string {
+	t.Helper()
+
+	waitWalletTx(t, jd, txid)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	var prioritized any
+	_ = rpc.Call(ctx, "prioritisetransaction", []any{txid, 0, 100000000}, &prioritized)
+
+	for attempt := 0; attempt < 6; attempt++ {
+		if err := mineOne(ctx, jd); err != nil {
+			t.Fatalf("mine: %v", err)
+		}
+
+		var height int64
+		if err := rpc.Call(ctx, "getblockcount", nil, &height); err != nil {
+			t.Fatalf("getblockcount: %v", err)
+		}
+		hash, err := rpc.GetBlockHash(ctx, height)
+		if err != nil {
+			t.Fatalf("getblockhash: %v", err)
+		}
+
+		var blk struct {
+			Tx []string `json:"tx"`
+		}
+		if err := rpc.Call(ctx, "getblock", []any{hash, 1}, &blk); err != nil {
+			t.Fatalf("getblock: %v", err)
+		}
+		for _, got := range blk.Tx {
+			if strings.EqualFold(got, txid) {
+				return hash
+			}
+		}
+	}
+
+	t.Fatalf("tx not mined")
+	return ""
 }
 
 func waitSpendableOrchardNote(t *testing.T, jd *containers.Junocashd) {

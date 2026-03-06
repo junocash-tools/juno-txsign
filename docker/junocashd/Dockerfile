@@ -1,7 +1,7 @@
 FROM --platform=linux/amd64 ubuntu:22.04
 
-ARG JUNOCASH_VERSION=0.9.8
-ARG JUNOCASH_LINUX64_SHA256=67aca81b97644525aaa997024b15815202a0ea68f378d9d0213b4a3cb2ed6960
+ARG JUNOCASH_VERSION=0.9.9
+ARG JUNOCASH_LINUX64_SHA256=dbba960836009d84b97475578e8c2c49a1c59714421d846d1972c22879ef47db
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \

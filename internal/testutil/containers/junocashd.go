@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	defaultJunocashVersion = "0.9.8"
+	defaultJunocashVersion = "0.9.9"
 	defaultRPCUser         = "rpcuser"
 	defaultRPCPassword     = "rpcpass"
 )
@@ -57,6 +57,10 @@ func StartJunocashd(ctx context.Context) (*Junocashd, error) {
 			"-daemon=0",
 			"-listen=0",
 			"-printtoconsole=1",
+			"-txunpaidactionlimit=10000",
+			"-blockunpaidactionlimit=0",
+			"-txexpirydelta=4",
+			"-blockmintxfee=0",
 			"-datadir=/data",
 			"-rpcbind=0.0.0.0",
 			"-rpcallowip=0.0.0.0/0",
