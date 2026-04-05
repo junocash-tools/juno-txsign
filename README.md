@@ -36,8 +36,20 @@ Machine-readable output:
 Sign a final 32-byte EIP-712 digest (no prefixing/re-hashing):
 
 - `JUNO_TXSIGN_SIGNER_KEYS=<hex1>,<hex2> juno-txsign sign-digest --digest 0x<64-hex> --json`
+- `JUNO_TXSIGN_SIGNER_KEYS=<hex1> juno-txsign sign-digest --digest 0x<64-hex> --operator-endpoint https://op1.example.com --operator-endpoint https://op2.example.com --json`
 
-`sign-digest` reads signer keys from `JUNO_TXSIGN_SIGNER_KEYS` as a comma-separated list of secp256k1 private keys (32-byte hex, optional `0x` prefixes).
+`sign-digest` always reads local signer keys from `JUNO_TXSIGN_SIGNER_KEYS` as a comma-separated list of secp256k1 private keys (32-byte hex, optional `0x` prefixes). When `--operator-endpoint` is repeated, `juno-txsign` also queries each remote operator at `POST /v1/sign-digest` and returns the merged signature set.
+
+### Operator service mode
+
+Expose a digest-signing HTTP API for remote callers:
+
+- `JUNO_TXSIGN_SIGNER_KEYS=<hex1>,<hex2> juno-txsign serve --listen 127.0.0.1:8080`
+
+Endpoints:
+
+- `GET /healthz`
+- `POST /v1/sign-digest` with `{"version":"v1","digest":"0x<64-hex>"}`
 
 ### External signing mode (Orchard spend-auth TSS)
 
@@ -93,7 +105,7 @@ export LD_LIBRARY_PATH="$PWD/rust/juno-tx/target/release:$PWD/rust/witness/targe
 - success: `{"version":"v1","status":"ok","data":{"signatures":["0x<65-byte-sig>", "..."]}}`
 - error: `{"version":"v1","status":"err","error":{"code":"<machine_code>","message":"<human_message>"}}`
 
-For `sign-digest`, each signature is `r || s || v` (65 bytes), with `v` in `{27,28}` and canonical low-`s`. Output signatures are sorted by recovered signer address ascending and guaranteed unique.
+For `sign-digest`, each signature is `r || s || v` (65 bytes), with `v` in `{27,28}` and canonical low-`s`. Output signatures are sorted by recovered signer address ascending and guaranteed unique across local plus remote operators.
 
 ## Fees
 

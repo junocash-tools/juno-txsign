@@ -24,6 +24,11 @@ type signerSignature struct {
 	sigHex  string
 }
 
+const (
+	JSONVersionV1  = "v1"
+	SignDigestPath = "/v1/sign-digest"
+)
+
 func ParseDigestHex(raw string) ([]byte, error) {
 	digestHex := strings.TrimSpace(raw)
 	if digestHex == "" {
@@ -97,8 +102,7 @@ func SignDigest(digest []byte, signerKeys []string) ([]string, error) {
 		return nil, errors.New("no signer keys")
 	}
 
-	signed := make([]signerSignature, 0, len(signerKeys))
-	seenAddr := make(map[string]struct{}, len(signerKeys))
+	signed := make([]string, 0, len(signerKeys))
 
 	for i, keyHex := range signerKeys {
 		keyBytes, err := hex.DecodeString(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(keyHex)), "0x"))
@@ -121,9 +125,75 @@ func SignDigest(digest []byte, signerKeys []string) ([]string, error) {
 			return nil, fmt.Errorf("signer key %d signature has high-s", i)
 		}
 
+		signed = append(signed, compactSignatureHex(compact))
+	}
+
+	return NormalizeSignatures(digest, signed)
+}
+
+func NormalizeSignatures(digest []byte, signatures []string) ([]string, error) {
+	validated, err := validateSignatures(digest, signatures)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, len(validated))
+	for i := range validated {
+		out[i] = validated[i].sigHex
+	}
+	return out, nil
+}
+
+func MergeSignatureSets(digest []byte, signatureSets ...[]string) ([]string, error) {
+	total := 0
+	for _, set := range signatureSets {
+		total += len(set)
+	}
+	flat := make([]string, 0, total)
+	for _, set := range signatureSets {
+		flat = append(flat, set...)
+	}
+	return NormalizeSignatures(digest, flat)
+}
+
+func validateSignatures(digest []byte, signatures []string) ([]signerSignature, error) {
+	if len(digest) != 32 {
+		return nil, errors.New("digest must be 32 bytes")
+	}
+	if len(signatures) == 0 {
+		return nil, errors.New("no signatures")
+	}
+
+	validated := make([]signerSignature, 0, len(signatures))
+	seenAddr := make(map[string]struct{}, len(signatures))
+
+	for i, sigHex := range signatures {
+		normalized, raw, err := parseSignatureHex(sigHex)
+		if err != nil {
+			return nil, fmt.Errorf("signature %d invalid: %w", i, err)
+		}
+
+		v := raw[64]
+		if v != 27 && v != 28 {
+			return nil, fmt.Errorf("signature %d v invalid", i)
+		}
+
+		r := new(big.Int).SetBytes(raw[:32])
+		if r.Sign() <= 0 {
+			return nil, fmt.Errorf("signature %d r invalid", i)
+		}
+
+		s := new(big.Int).SetBytes(raw[32:64])
+		if s.Cmp(secp256k1HalfN) > 0 {
+			return nil, fmt.Errorf("signature %d has high-s", i)
+		}
+
+		compact := make([]byte, 65)
+		compact[0] = v
+		copy(compact[1:], raw[:64])
+
 		pub, _, err := ecdsa.RecoverCompact(compact, digest)
 		if err != nil {
-			return nil, fmt.Errorf("signer key %d signature recovery failed", i)
+			return nil, fmt.Errorf("signature %d recovery failed", i)
 		}
 		addr := strings.ToLower(evmAddressHex(pub))
 		if _, exists := seenAddr[addr]; exists {
@@ -131,26 +201,45 @@ func SignDigest(digest []byte, signerKeys []string) ([]string, error) {
 		}
 		seenAddr[addr] = struct{}{}
 
-		sigOut := make([]byte, 65)
-		copy(sigOut[:32], compact[1:33])  // r
-		copy(sigOut[32:64], compact[33:]) // s
-		sigOut[64] = v
-
-		signed = append(signed, signerSignature{
+		validated = append(validated, signerSignature{
 			address: addr,
-			sigHex:  "0x" + hex.EncodeToString(sigOut),
+			sigHex:  normalized,
 		})
 	}
 
-	sort.Slice(signed, func(i, j int) bool {
-		return signed[i].address < signed[j].address
+	sort.Slice(validated, func(i, j int) bool {
+		return validated[i].address < validated[j].address
 	})
+	return validated, nil
+}
 
-	out := make([]string, len(signed))
-	for i := range signed {
-		out[i] = signed[i].sigHex
+func parseSignatureHex(sigHex string) (string, []byte, error) {
+	trimmed := strings.TrimSpace(sigHex)
+	if !strings.HasPrefix(trimmed, "0x") && !strings.HasPrefix(trimmed, "0X") {
+		return "", nil, errors.New("must be 0x-prefixed 65-byte hex")
 	}
-	return out, nil
+
+	rawHex := strings.TrimPrefix(strings.TrimPrefix(trimmed, "0x"), "0X")
+	if len(rawHex) != 130 {
+		return "", nil, errors.New("must be 0x-prefixed 65-byte hex")
+	}
+
+	raw, err := hex.DecodeString(rawHex)
+	if err != nil {
+		return "", nil, errors.New("must be 0x-prefixed 65-byte hex")
+	}
+	if len(raw) != 65 {
+		return "", nil, errors.New("must be 0x-prefixed 65-byte hex")
+	}
+	return "0x" + hex.EncodeToString(raw), raw, nil
+}
+
+func compactSignatureHex(compact []byte) string {
+	sigOut := make([]byte, 65)
+	copy(sigOut[:32], compact[1:33])  // r
+	copy(sigOut[32:64], compact[33:]) // s
+	sigOut[64] = compact[0]
+	return "0x" + hex.EncodeToString(sigOut)
 }
 
 func evmAddressHex(pub *secp256k1.PublicKey) string {

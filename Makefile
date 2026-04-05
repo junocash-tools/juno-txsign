@@ -26,7 +26,8 @@ rust-test:
 
 test-unit:
 	$(MAKE) rust-test
-	CGO_ENABLED=0 go test $(TESTFLAGS) ./internal/plan ./internal/cliout ./internal/digestsign
+	CGO_ENABLED=0 go test $(TESTFLAGS) ./internal/plan ./internal/cliout ./internal/digestsign ./internal/digestsignhttp
+	go test $(TESTFLAGS) ./internal/cli
 
 test-integration:
 	$(MAKE) rust-build

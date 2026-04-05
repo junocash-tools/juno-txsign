@@ -7,18 +7,26 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Abdullah1738/juno-sdk-go/types"
 	"github.com/Abdullah1738/juno-txsign/internal/cliout"
 	"github.com/Abdullah1738/juno-txsign/internal/digestsign"
+	"github.com/Abdullah1738/juno-txsign/internal/digestsignhttp"
 	"github.com/Abdullah1738/juno-txsign/pkg/txsign"
 )
 
 const jsonVersionV1 = "v1"
+
+var newHTTPClient = func() *http.Client {
+	return &http.Client{}
+}
 
 func Run(args []string) int {
 	return RunWithIO(args, os.Stdout, os.Stderr)
@@ -38,6 +46,8 @@ func RunWithIO(args []string, stdout, stderr io.Writer) int {
 		return runSign(args[1:], stdout, stderr)
 	case "sign-digest":
 		return runSignDigest(args[1:], stdout, stderr)
+	case "serve":
+		return runServe(args[1:], stdout, stderr)
 	case "ext-prepare":
 		return runExtPrepare(args[1:], stdout, stderr)
 	case "ext-finalize":
@@ -56,14 +66,16 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  juno-txsign sign --txplan <path|-> --seed-base64 <b64> [--out <path>] [--json] [--action-indices]")
-	fmt.Fprintln(w, "  juno-txsign sign-digest --digest <0x32-byte-hex> --json")
+	fmt.Fprintln(w, "  juno-txsign sign-digest --digest <0x32-byte-hex> [--operator-endpoint <url> ...] --json")
+	fmt.Fprintln(w, "  juno-txsign serve --listen <addr>")
 	fmt.Fprintln(w, "  juno-txsign ext-prepare --txplan <path|-> --ufvk <jview...> [--out-prepared <path>] [--out-requests <path>]")
 	fmt.Fprintln(w, "  juno-txsign ext-finalize --prepared-tx <path> --sigs <path> [--out <path>] [--json] [--action-indices]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Notes:")
-	fmt.Fprintln(w, "  - This command performs no network calls.")
 	fmt.Fprintln(w, "  - Do not log or store seeds/spending keys.")
 	fmt.Fprintln(w, "  - sign-digest reads signer keys from JUNO_TXSIGN_SIGNER_KEYS (comma-separated 32-byte hex keys).")
+	fmt.Fprintln(w, "  - sign and ext-* remain offline; sign-digest can also query remote operator endpoints.")
+	fmt.Fprintln(w, "  - serve exposes POST /v1/sign-digest and GET /healthz on the listen address.")
 }
 
 func runSign(args []string, stdout, stderr io.Writer) int {
@@ -312,12 +324,18 @@ func runSignDigest(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(io.Discard)
 
 	var digestHex string
+	var operatorEndpoints stringListFlag
 	var jsonOut bool
 
 	fs.StringVar(&digestHex, "digest", "", "final EIP-712 digest (0x-prefixed 32-byte hex)")
+	fs.Var(&operatorEndpoints, "operator-endpoint", "operator base URL (repeatable)")
 	fs.BoolVar(&jsonOut, "json", false, "JSON output (required)")
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			writeSignDigestUsage(stdout)
+			return 0
+		}
 		fmt.Fprintln(stderr, err.Error())
 		return 2
 	}
@@ -347,6 +365,26 @@ func runSignDigest(args []string, stdout, stderr io.Writer) int {
 		return writeSignDigestErr(stdout, "sign_failed", err.Error(), 1)
 	}
 
+	for i, endpoint := range operatorEndpoints {
+		if _, err := digestsign.ParseOperatorEndpoint(endpoint); err != nil {
+			return writeSignDigestErr(stdout, "invalid_request", fmt.Sprintf("operator endpoint %d: %s", i+1, err.Error()), 1)
+		}
+	}
+
+	remoteSigSets, err := digestsign.CollectRemoteSignatures(context.Background(), digest, operatorEndpoints, newHTTPClient())
+	if err != nil {
+		return writeSignDigestErr(stdout, "sign_failed", err.Error(), 1)
+	}
+	if len(remoteSigSets) > 0 {
+		signatureSets := make([][]string, 0, len(remoteSigSets)+1)
+		signatureSets = append(signatureSets, sigs)
+		signatureSets = append(signatureSets, remoteSigSets...)
+		sigs, err = digestsign.MergeSignatureSets(digest, signatureSets...)
+		if err != nil {
+			return writeSignDigestErr(stdout, "sign_failed", err.Error(), 1)
+		}
+	}
+
 	type signDigestData struct {
 		Signatures []string `json:"signatures"`
 	}
@@ -363,6 +401,113 @@ func runSignDigest(args []string, stdout, stderr io.Writer) int {
 		},
 	})
 	return 0
+}
+
+func runServe(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	var listen string
+	var maxBodyBytes int64
+
+	fs.StringVar(&listen, "listen", "127.0.0.1:8080", "listen address (host:port)")
+	fs.Int64Var(&maxBodyBytes, "max-body-bytes", 1<<20, "max request body bytes")
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			writeServeUsage(stdout)
+			return 0
+		}
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+
+	listen = strings.TrimSpace(listen)
+	if listen == "" {
+		fmt.Fprintln(stderr, "listen is required")
+		return 1
+	}
+
+	keys, err := digestsign.LoadSignerKeysFromEnv()
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 1
+	}
+
+	api, err := digestsignhttp.New(keys, digestsignhttp.WithMaxBodyBytes(maxBodyBytes))
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 1
+	}
+
+	srv := &http.Server{
+		Addr:              listen,
+		Handler:           api.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errCh:
+		if err == nil || errors.Is(err, http.ErrServerClosed) {
+			return 0
+		}
+		fmt.Fprintln(stderr, err.Error())
+		return 1
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+		return 0
+	}
+}
+
+func writeSignDigestUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  juno-txsign sign-digest --digest <0x32-byte-hex> [--operator-endpoint <url> ...] --json")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Flags:")
+	fmt.Fprintln(w, "  --digest              final EIP-712 digest (0x-prefixed 32-byte hex)")
+	fmt.Fprintln(w, "  --operator-endpoint   operator base URL; repeat to collect remote signatures")
+	fmt.Fprintln(w, "  --json                JSON output (required)")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Notes:")
+	fmt.Fprintln(w, "  - Local signing via JUNO_TXSIGN_SIGNER_KEYS is always required.")
+	fmt.Fprintln(w, "  - Each operator endpoint must be an http(s) origin/base URL; juno-txsign calls /v1/sign-digest.")
+}
+
+func writeServeUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  juno-txsign serve [--listen <addr>] [--max-body-bytes <n>]")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Flags:")
+	fmt.Fprintln(w, "  --listen          listen address (host:port)")
+	fmt.Fprintln(w, "  --max-body-bytes  max request body bytes")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Notes:")
+	fmt.Fprintln(w, "  - serve requires JUNO_TXSIGN_SIGNER_KEYS at startup.")
+	fmt.Fprintln(w, "  - Endpoints: GET /healthz, POST /v1/sign-digest")
+}
+
+type stringListFlag []string
+
+func (f *stringListFlag) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *stringListFlag) Set(v string) error {
+	*f = append(*f, v)
+	return nil
 }
 
 func writeSignDigestErr(stdout io.Writer, code, msg string, exitCode int) int {

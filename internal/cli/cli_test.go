@@ -50,6 +50,36 @@ func TestRunSignDigest_UsageRequiresJSON(t *testing.T) {
 	}
 }
 
+func TestRunSignDigest_HelpIncludesOperatorEndpoint(t *testing.T) {
+	var out, errBuf bytes.Buffer
+
+	code := RunWithIO([]string{"sign-digest", "--help"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("code=%d want=0 stderr=%q", code, errBuf.String())
+	}
+	if errBuf.Len() != 0 {
+		t.Fatalf("unexpected stderr: %q", errBuf.String())
+	}
+	if !strings.Contains(out.String(), "--operator-endpoint") {
+		t.Fatalf("help missing --operator-endpoint: %q", out.String())
+	}
+}
+
+func TestRunServe_HelpIncludesListen(t *testing.T) {
+	var out, errBuf bytes.Buffer
+
+	code := RunWithIO([]string{"serve", "--help"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("code=%d want=0 stderr=%q", code, errBuf.String())
+	}
+	if errBuf.Len() != 0 {
+		t.Fatalf("unexpected stderr: %q", errBuf.String())
+	}
+	if !strings.Contains(out.String(), "--listen") {
+		t.Fatalf("help missing --listen: %q", out.String())
+	}
+}
+
 func TestRunSignDigest_InvalidDigest_ErrorEnvelope(t *testing.T) {
 	t.Setenv(digestsign.EnvSignerKeys, "4c0883a69102937d6231471b5dbb6204fe512961708279f3136f8f5d7f7f5f5a")
 
@@ -109,6 +139,39 @@ func TestRunSignDigest_MissingSignerKeys_ErrorEnvelope(t *testing.T) {
 	}
 	if resp.Error.Code != "sign_failed" {
 		t.Fatalf("unexpected error code: %q", resp.Error.Code)
+	}
+}
+
+func TestRunSignDigest_InvalidOperatorEndpoint_ErrorEnvelope(t *testing.T) {
+	t.Setenv(digestsign.EnvSignerKeys, "4c0883a69102937d6231471b5dbb6204fe512961708279f3136f8f5d7f7f5f5a")
+
+	var out, errBuf bytes.Buffer
+	code := RunWithIO([]string{
+		"sign-digest",
+		"--digest", "0x6f4e9b6c0f2e4bd2fa44b3bc1f2c0989e5da0dc89f2e4c6d90c1f8b84eb5fcd1",
+		"--operator-endpoint", "https://example.com/path",
+		"--json",
+	}, &out, &errBuf)
+	if code != 1 {
+		t.Fatalf("code=%d want=1", code)
+	}
+	if errBuf.Len() != 0 {
+		t.Fatalf("unexpected stderr: %q", errBuf.String())
+	}
+
+	var resp struct {
+		Version string `json:"version"`
+		Status  string `json:"status"`
+		Error   struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid json: %v (%q)", err, out.String())
+	}
+	if resp.Version != "v1" || resp.Status != "err" || resp.Error.Code != "invalid_request" {
+		t.Fatalf("unexpected response: %+v", resp)
 	}
 }
 
