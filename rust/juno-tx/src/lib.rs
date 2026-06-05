@@ -699,7 +699,10 @@ fn build_send(req: &TxRequest) -> Result<BuiltTx, TxBuildError> {
     }
 
     let branch_id = parse_branch_id(*branch_id)?;
-    if !matches!(branch_id, BranchId::Nu5 | BranchId::Nu6 | BranchId::Nu6_1) {
+    if !matches!(
+        branch_id,
+        BranchId::Nu5 | BranchId::Nu6 | BranchId::Nu6_1 | BranchId::Nu6_2
+    ) {
         return Err(TxBuildError::BranchIDInvalid);
     }
     if *expiry_height == 0 {
@@ -959,7 +962,10 @@ fn build_shield(req: &TxRequest) -> Result<BuiltTx, TxBuildError> {
     }
 
     let branch_id = parse_branch_id(*branch_id)?;
-    if !matches!(branch_id, BranchId::Nu5 | BranchId::Nu6 | BranchId::Nu6_1) {
+    if !matches!(
+        branch_id,
+        BranchId::Nu5 | BranchId::Nu6 | BranchId::Nu6_1 | BranchId::Nu6_2
+    ) {
         return Err(TxBuildError::BranchIDInvalid);
     }
     if *expiry_height == 0 {
@@ -1035,7 +1041,7 @@ fn build_shield(req: &TxRequest) -> Result<BuiltTx, TxBuildError> {
             let coin = TransparentTxOut::new(value, script_pubkey);
 
             t_builder
-                .add_input(*pk, outpoint, coin)
+                .add_p2pkh_input(*pk, outpoint, coin)
                 .map_err(|_| TxBuildError::TransparentUTXOInvalid)?;
 
             total_in = total_in
@@ -1384,7 +1390,10 @@ fn ext_prepare(req: ExtPrepareRequest) -> Result<(PreparedTxV0, SigningRequestsV
     }
 
     let branch_id = parse_branch_id(branch_id)?;
-    if !matches!(branch_id, BranchId::Nu5 | BranchId::Nu6 | BranchId::Nu6_1) {
+    if !matches!(
+        branch_id,
+        BranchId::Nu5 | BranchId::Nu6 | BranchId::Nu6_1 | BranchId::Nu6_2
+    ) {
         return Err(TxBuildError::BranchIDInvalid);
     }
     if expiry_height == 0 {
@@ -1600,7 +1609,10 @@ fn ext_finalize(req: ExtFinalizeRequest) -> Result<BuiltTx, TxBuildError> {
     }
 
     let branch_id = parse_branch_id(prepared_tx.branch_id)?;
-    if !matches!(branch_id, BranchId::Nu5 | BranchId::Nu6 | BranchId::Nu6_1) {
+    if !matches!(
+        branch_id,
+        BranchId::Nu5 | BranchId::Nu6 | BranchId::Nu6_1 | BranchId::Nu6_2
+    ) {
         return Err(TxBuildError::BranchIDInvalid);
     }
     if prepared_tx.expiry_height == 0 {
@@ -1917,6 +1929,11 @@ mod tests {
             Err(TxBuildError::UfvkValueLenInvalid) => {}
             other => panic!("expected value len invalid, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_juno_nu6_2_branch_id() {
+        assert_eq!(parse_branch_id(0x5437_f330).expect("branch id"), BranchId::Nu6_2);
     }
 
     fn test_pczt_one_spend_one_output() -> (orchard::pczt::Bundle, Vec<u32>, SpendAuthorizingKey, [u8; 32]) {
