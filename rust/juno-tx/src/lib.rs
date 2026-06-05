@@ -668,10 +668,32 @@ fn required_fee_shield(input_count: usize) -> Result<Zatoshis, TxBuildError> {
     Zatoshis::from_u64(fee).map_err(|_| TxBuildError::FeeInvalid)
 }
 
-static ORCHARD_PROVING_KEY: OnceLock<orchard::circuit::ProvingKey> = OnceLock::new();
+static ORCHARD_PROVING_KEY_FIXED: OnceLock<orchard::circuit::ProvingKey> = OnceLock::new();
+static ORCHARD_PROVING_KEY_INSECURE_PRE_NU6_2: OnceLock<orchard::circuit::ProvingKey> =
+    OnceLock::new();
 
-fn orchard_proving_key() -> &'static orchard::circuit::ProvingKey {
-    ORCHARD_PROVING_KEY.get_or_init(orchard::circuit::ProvingKey::build)
+fn orchard_circuit_version_for_branch(
+    branch_id: BranchId,
+) -> orchard::circuit::OrchardCircuitVersion {
+    match branch_id {
+        BranchId::Nu6_2 => orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2,
+        _ => orchard::circuit::OrchardCircuitVersion::InsecurePreNu6_2,
+    }
+}
+
+fn orchard_proving_key_for_branch(branch_id: BranchId) -> &'static orchard::circuit::ProvingKey {
+    match orchard_circuit_version_for_branch(branch_id) {
+        orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2 => {
+            ORCHARD_PROVING_KEY_FIXED.get_or_init(orchard::circuit::ProvingKey::build)
+        }
+        orchard::circuit::OrchardCircuitVersion::InsecurePreNu6_2 => {
+            ORCHARD_PROVING_KEY_INSECURE_PRE_NU6_2.get_or_init(|| {
+                orchard::circuit::ProvingKey::build_for_version(
+                    orchard::circuit::OrchardCircuitVersion::InsecurePreNu6_2,
+                )
+            })
+        }
+    }
 }
 
 fn build_send(req: &TxRequest) -> Result<BuiltTx, TxBuildError> {
@@ -752,8 +774,11 @@ fn build_send(req: &TxRequest) -> Result<BuiltTx, TxBuildError> {
             outputs_parsed.push((to_addr, amount, memo_bytes));
         }
 
-        let mut orchard_builder =
-            orchard::builder::Builder::new(orchard::builder::BundleType::DEFAULT, anchor);
+        let mut orchard_builder = orchard::builder::Builder::new_for_version(
+            orchard::builder::BundleType::DEFAULT,
+            anchor,
+            orchard_circuit_version_for_branch(branch_id),
+        );
 
         let mut total_in: u64 = 0;
 
@@ -891,7 +916,7 @@ fn build_send(req: &TxRequest) -> Result<BuiltTx, TxBuildError> {
             .orchard_bundle()
             .cloned()
             .map(|b| {
-                b.create_proof(orchard_proving_key(), &mut rng)
+                b.create_proof(orchard_proving_key_for_branch(branch_id), &mut rng)
                     .and_then(|b| {
                         b.apply_signatures(
                             &mut OsRng,
@@ -1057,8 +1082,11 @@ fn build_shield(req: &TxRequest) -> Result<BuiltTx, TxBuildError> {
         }
         let out_value = total_in - fee_u64;
 
-        let mut orchard_builder =
-            orchard::builder::Builder::new(orchard::builder::BundleType::DEFAULT, anchor);
+        let mut orchard_builder = orchard::builder::Builder::new_for_version(
+            orchard::builder::BundleType::DEFAULT,
+            anchor,
+            orchard_circuit_version_for_branch(branch_id),
+        );
         orchard_builder
             .add_output(
                 None,
@@ -1119,7 +1147,7 @@ fn build_shield(req: &TxRequest) -> Result<BuiltTx, TxBuildError> {
             .orchard_bundle()
             .cloned()
             .map(|b| {
-                b.create_proof(orchard_proving_key(), &mut rng)
+                b.create_proof(orchard_proving_key_for_branch(branch_id), &mut rng)
                     .and_then(|b| {
                         b.apply_signatures(&mut rng, *shielded_sig_commitment.as_ref(), &[])
                     })
@@ -1438,8 +1466,11 @@ fn ext_prepare(req: ExtPrepareRequest) -> Result<(PreparedTxV0, SigningRequestsV
         outputs_parsed.push((to_addr, amount, memo_bytes));
     }
 
-    let mut orchard_builder =
-        orchard::builder::Builder::new(orchard::builder::BundleType::DEFAULT, anchor);
+    let mut orchard_builder = orchard::builder::Builder::new_for_version(
+        orchard::builder::BundleType::DEFAULT,
+        anchor,
+        orchard_circuit_version_for_branch(branch_id),
+    );
     let mut total_in: u64 = 0;
 
     for n in &notes {
@@ -1572,7 +1603,7 @@ fn ext_prepare(req: ExtPrepareRequest) -> Result<(PreparedTxV0, SigningRequestsV
         .finalize_io(sighash, &mut rng)
         .map_err(|_| TxBuildError::TxBuildFailed)?;
     pczt_bundle
-        .create_proof(orchard_proving_key(), &mut rng)
+        .create_proof(orchard_proving_key_for_branch(branch_id), &mut rng)
         .map_err(|_| TxBuildError::TxBuildFailed)?;
 
     let prepared_tx = PreparedTxV0 {
@@ -1936,6 +1967,18 @@ mod tests {
         assert_eq!(parse_branch_id(0x5437_f330).expect("branch id"), BranchId::Nu6_2);
     }
 
+    #[test]
+    fn orchard_circuit_tracks_nu6_2_boundary() {
+        assert_eq!(
+            orchard_circuit_version_for_branch(BranchId::Nu6_1),
+            orchard::circuit::OrchardCircuitVersion::InsecurePreNu6_2
+        );
+        assert_eq!(
+            orchard_circuit_version_for_branch(BranchId::Nu6_2),
+            orchard::circuit::OrchardCircuitVersion::FixedPostNu6_2
+        );
+    }
+
     fn test_pczt_one_spend_one_output() -> (orchard::pczt::Bundle, Vec<u32>, SpendAuthorizingKey, [u8; 32]) {
         let seed = [9u8; 64];
         let account = AccountId::try_from(0).expect("account");
@@ -2085,12 +2128,12 @@ mod tests {
     }
 
     #[test]
-    fn finalize_rejects_invalid_signature() {
+    fn finalize_rejects_invalid_authorized_pczt() {
         let (pczt_bundle, required, _ask, _sighash) = test_pczt_one_spend_one_output();
         let mut orchard_pczt = orchard_pczt_bundle_to_v0(&pczt_bundle);
         orchard_pczt.zkproof = Some("00".to_string());
 
-        // A correctly sized but invalid signature should fail signature verification.
+        // The PCZT extractor rejects malformed authorized bundle data before tx extraction.
         let sig_hex = "00".repeat(64);
         let req = ExtFinalizeRequest {
             prepared_tx: PreparedTxV0 {
@@ -2113,8 +2156,8 @@ mod tests {
         };
 
         match ext_finalize(req) {
-            Err(TxBuildError::SpendAuthSigInvalid) => {}
-            other => panic!("expected invalid sig error, got {other:?}"),
+            Err(TxBuildError::PreparedTxPcztInvalid) => {}
+            other => panic!("expected invalid authorized PCZT error, got {other:?}"),
         }
     }
 }
