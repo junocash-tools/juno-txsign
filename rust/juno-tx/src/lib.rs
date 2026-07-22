@@ -21,7 +21,7 @@ use sapling::builder as sapling_builder;
 use secp256k1::{PublicKey as SecpPublicKey, Secp256k1, SecretKey as SecpSecretKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256, Sha512};
-use std::sync::OnceLock;
+use std::{collections::HashSet, sync::OnceLock};
 use thiserror::Error;
 use zcash_note_encryption::{try_compact_note_decryption, EphemeralKeyBytes};
 use zcash_primitives::transaction::{
@@ -213,7 +213,6 @@ impl From<FinalizedTx> for ExtFinalizeResponse {
 #[derive(Debug, Deserialize)]
 struct OrchardSpendNote {
     #[allow(dead_code)]
-    #[serde(default)]
     note_id: String,
     action_nullifier: String,
     cmx: String,
@@ -403,6 +402,28 @@ fn parse_hex<const N: usize>(s: &str, err: TxBuildError) -> Result<[u8; N], TxBu
     let bytes = hex::decode(t).map_err(|_| err)?;
     let arr: [u8; N] = bytes.try_into().map_err(|_| err)?;
     Ok(arr)
+}
+
+fn validate_note_ids(notes: &[OrchardSpendNote]) -> Result<(), TxBuildError> {
+    let mut seen = HashSet::with_capacity(notes.len());
+    for note in notes {
+        let Some((txid, action)) = note.note_id.split_once(':') else {
+            return Err(TxBuildError::NotesInvalid);
+        };
+        if txid.len() != 64
+            || !txid
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || action.is_empty()
+            || (action.len() > 1 && action.starts_with('0'))
+            || !action.bytes().all(|b| b.is_ascii_digit())
+            || action.parse::<u32>().is_err()
+            || !seen.insert(note.note_id.as_str())
+        {
+            return Err(TxBuildError::NotesInvalid);
+        }
+    }
+    Ok(())
 }
 
 fn parse_branch_id(v: u32) -> Result<BranchId, TxBuildError> {
@@ -885,6 +906,7 @@ fn build_send(req: &TxRequest) -> Result<BuiltTx, TxBuildError> {
     if notes.is_empty() || notes.len() > MAX_ORCHARD_SPENDS {
         return Err(TxBuildError::NotesInvalid);
     }
+    validate_note_ids(notes)?;
 
     let mut seed = decode_seed(seed_base64)?;
     let res = (|| -> Result<BuiltTx, TxBuildError> {
@@ -1584,6 +1606,7 @@ fn ext_prepare(req: ExtPrepareRequest) -> Result<(PreparedTxV0, SigningRequestsV
     if notes.is_empty() || notes.len() > MAX_ORCHARD_SPENDS {
         return Err(TxBuildError::NotesInvalid);
     }
+    validate_note_ids(&notes)?;
 
     let fvk = decode_fvk_from_ufvk(&ufvk, coin_type)?;
     let pivk_external = fvk.to_ivk(Scope::External).prepare();
@@ -2082,7 +2105,7 @@ mod tests {
 
     fn placeholder_note() -> OrchardSpendNote {
         OrchardSpendNote {
-            note_id: "placeholder:0".to_string(),
+            note_id: format!("{}:0", "1".repeat(64)),
             action_nullifier: "00".repeat(32),
             cmx: "00".repeat(32),
             position: 0,
@@ -2090,6 +2113,23 @@ mod tests {
             ephemeral_key: "00".repeat(32),
             enc_ciphertext: "00".repeat(52),
         }
+    }
+
+    #[test]
+    fn note_ids_require_canonical_unique_outpoints() {
+        let mut note = placeholder_note();
+        assert!(validate_note_ids(&[placeholder_note()]).is_ok());
+
+        note.note_id = format!("{}:00", "1".repeat(64));
+        assert!(matches!(
+            validate_note_ids(&[note]),
+            Err(TxBuildError::NotesInvalid)
+        ));
+
+        assert!(matches!(
+            validate_note_ids(&[placeholder_note(), placeholder_note()]),
+            Err(TxBuildError::NotesInvalid)
+        ));
     }
 
     fn send_request(output: String, change_address: String) -> TxRequest {
@@ -2258,7 +2298,7 @@ mod tests {
     }
 
     #[test]
-    fn ext_prepare_ffi_accepts_schema_optional_note_id() {
+    fn ext_prepare_ffi_rejects_missing_required_note_id() {
         let branch_id: u32 = BranchId::Nu6_2.into();
         let request = serde_json::json!({
             "ufvk": "not-a-ufvk",
@@ -2293,7 +2333,7 @@ mod tests {
 
         let response: serde_json::Value = serde_json::from_str(&response).expect("JSON response");
         assert_eq!(response["status"], "err");
-        assert_eq!(response["error"], "ufvk_invalid_bech32m");
+        assert_eq!(response["error"], "invalid_json");
     }
 
     #[test]

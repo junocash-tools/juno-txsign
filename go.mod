@@ -3,7 +3,7 @@ module github.com/Abdullah1738/juno-txsign
 go 1.24.0
 
 require (
-	github.com/Abdullah1738/juno-sdk-go v0.0.0-20251228203824-8f0a77c483ee
+	github.com/Abdullah1738/juno-sdk-go v1.4.1-0.20260722103830-748c99ae0722
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1
 	github.com/docker/docker v28.5.1+incompatible
 	github.com/docker/go-connections v0.6.0

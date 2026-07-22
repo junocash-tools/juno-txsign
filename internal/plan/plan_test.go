@@ -2,6 +2,7 @@ package plan
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -39,6 +40,7 @@ func TestBuildSendRequestJSON_ValidatesSeedBase64(t *testing.T) {
 		FeeZat:        "10000",
 		Notes: []types.OrchardSpendNote{
 			{
+				NoteID:          strings.Repeat("1", 64) + ":0",
 				ActionNullifier: strings.Repeat("b", 64),
 				CMX:             strings.Repeat("c", 64),
 				Position:        0,
@@ -100,6 +102,7 @@ func TestValidateTxPlanV0_RejectsMoreThan200Notes(t *testing.T) {
 	plan.Notes = make([]types.OrchardSpendNote, 200)
 	for i := range plan.Notes {
 		plan.Notes[i] = note
+		plan.Notes[i].NoteID = fmt.Sprintf("%064x:0", i+1)
 	}
 	if err := ValidateTxPlanV0(plan); err != nil {
 		t.Fatalf("200 notes rejected: %v", err)
@@ -130,6 +133,7 @@ func validTxPlanV0() types.TxPlan {
 		ChangeAddress: "jregtest1change",
 		FeeZat:        "10000",
 		Notes: []types.OrchardSpendNote{{
+			NoteID:          strings.Repeat("1", 64) + ":0",
 			ActionNullifier: strings.Repeat("b", 64),
 			CMX:             strings.Repeat("c", 64),
 			Path:            path,
@@ -164,6 +168,7 @@ func TestBuildSendRequestJSON_AllowsMultipleOutputs(t *testing.T) {
 		FeeZat:        "15000",
 		Notes: []types.OrchardSpendNote{
 			{
+				NoteID:          strings.Repeat("1", 64) + ":0",
 				ActionNullifier: strings.Repeat("b", 64),
 				CMX:             strings.Repeat("c", 64),
 				Position:        0,
@@ -194,22 +199,96 @@ func TestBuildSendRequestJSON_AllowsMultipleOutputs(t *testing.T) {
 	}
 }
 
-func TestBuildExtPrepareRequestJSON_OmitsOptionalEmptyNoteID(t *testing.T) {
-	raw, err := BuildExtPrepareRequestJSON(validTxPlanV0(), "jview1test")
-	if err != nil {
-		t.Fatalf("BuildExtPrepareRequestJSON: %v", err)
+func TestValidateTxPlanV0_RejectsInvalidNoteIDs(t *testing.T) {
+	txid := strings.Repeat("1", 64)
+	tests := []struct {
+		name        string
+		noteID      string
+		wantMessage string
+	}{
+		{name: "missing", noteID: "", wantMessage: "note_id required"},
+		{name: "surrounding whitespace", noteID: " " + txid + ":0", wantMessage: "lowercase txid:action_index"},
+		{name: "uppercase txid", noteID: strings.Repeat("A", 64) + ":0", wantMessage: "lowercase txid:action_index"},
+		{name: "nonhex txid", noteID: strings.Repeat("g", 64) + ":0", wantMessage: "lowercase txid:action_index"},
+		{name: "short txid", noteID: strings.Repeat("1", 63) + ":0", wantMessage: "lowercase txid:action_index"},
+		{name: "missing action index", noteID: txid + ":", wantMessage: "lowercase txid:action_index"},
+		{name: "negative action index", noteID: txid + ":-1", wantMessage: "lowercase txid:action_index"},
+		{name: "nondecimal action index", noteID: txid + ":a", wantMessage: "lowercase txid:action_index"},
+		{name: "leading-zero action index", noteID: txid + ":00", wantMessage: "lowercase txid:action_index"},
+		{name: "extra separator", noteID: txid + ":0:1", wantMessage: "lowercase txid:action_index"},
+		{name: "uint32 overflow", noteID: txid + ":4294967296", wantMessage: "action_index must be uint32"},
 	}
 
-	var request struct {
-		Notes []map[string]any `json:"notes"`
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := validTxPlanV0()
+			plan.Notes[0].NoteID = tt.noteID
+			err := ValidateTxPlanV0(plan)
+			if err == nil || !strings.Contains(err.Error(), tt.wantMessage) {
+				t.Fatalf("ValidateTxPlanV0() error = %v, want message %q", err, tt.wantMessage)
+			}
+		})
 	}
-	if err := json.Unmarshal([]byte(raw), &request); err != nil {
-		t.Fatalf("unmarshal request: %v", err)
+}
+
+func TestValidateTxPlanV0_AcceptsMaximumNoteActionIndex(t *testing.T) {
+	plan := validTxPlanV0()
+	plan.Notes[0].NoteID = strings.Repeat("f", 64) + ":4294967295"
+
+	if err := ValidateTxPlanV0(plan); err != nil {
+		t.Fatalf("ValidateTxPlanV0() rejected uint32 maximum: %v", err)
 	}
-	if len(request.Notes) != 1 {
-		t.Fatalf("notes=%d want=1", len(request.Notes))
+}
+
+func TestValidateTxPlanV0_RejectsDuplicateNoteIDs(t *testing.T) {
+	plan := validTxPlanV0()
+	plan.Notes = append(plan.Notes, plan.Notes[0])
+
+	err := ValidateTxPlanV0(plan)
+	if err == nil || !strings.Contains(err.Error(), "notes[1].note_id duplicates notes[0].note_id") {
+		t.Fatalf("ValidateTxPlanV0() error = %v, want duplicate note_id error", err)
 	}
-	if _, ok := request.Notes[0]["note_id"]; ok {
-		t.Fatal("empty diagnostic note_id must be omitted")
+}
+
+func TestBuildRequestsPreserveRequiredNoteID(t *testing.T) {
+	plan := validTxPlanV0()
+	tests := []struct {
+		name  string
+		build func() (string, error)
+	}{
+		{
+			name: "direct signing",
+			build: func() (string, error) {
+				return BuildSendRequestJSON(plan, strings.Repeat("a", 44))
+			},
+		},
+		{
+			name: "external signing",
+			build: func() (string, error) {
+				return BuildExtPrepareRequestJSON(plan, "jview1test")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := tt.build()
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+
+			var request struct {
+				Notes []map[string]any `json:"notes"`
+			}
+			if err := json.Unmarshal([]byte(raw), &request); err != nil {
+				t.Fatalf("unmarshal request: %v", err)
+			}
+			if len(request.Notes) != 1 {
+				t.Fatalf("notes=%d want=1", len(request.Notes))
+			}
+			if got := request.Notes[0]["note_id"]; got != plan.Notes[0].NoteID {
+				t.Fatalf("note_id=%v want=%q", got, plan.Notes[0].NoteID)
+			}
+		})
 	}
 }

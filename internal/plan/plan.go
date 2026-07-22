@@ -6,13 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/Abdullah1738/juno-sdk-go/types"
 )
 
 var (
-	ErrInvalidPlan = errors.New("invalid txplan")
+	ErrInvalidPlan       = errors.New("invalid txplan")
+	canonicalNoteIDRegex = regexp.MustCompile(`^([0-9a-f]{64}):(0|[1-9][0-9]*)$`)
 )
 
 type SendRequest struct {
@@ -43,7 +46,9 @@ type ExtPrepareRequest struct {
 }
 
 type Note struct {
-	NoteID string `json:"note_id,omitempty"`
+	// NoteID is the stable source-note outpoint used to reserve a selected
+	// note: a lowercase transaction ID followed by its Orchard action index.
+	NoteID string `json:"note_id"`
 	// ActionNullifier is from the action that created this note, not the
 	// nullifier later derived when spending it.
 	ActionNullifier string   `json:"action_nullifier"`
@@ -101,7 +106,7 @@ func BuildSendRequestJSON(txplan types.TxPlan, seedBase64 string) (string, error
 
 	for _, n := range txplan.Notes {
 		req.Notes = append(req.Notes, Note{
-			NoteID:          strings.TrimSpace(n.NoteID),
+			NoteID:          n.NoteID,
 			ActionNullifier: strings.TrimSpace(n.ActionNullifier),
 			CMX:             strings.TrimSpace(n.CMX),
 			Position:        n.Position,
@@ -161,7 +166,7 @@ func BuildExtPrepareRequestJSON(txplan types.TxPlan, ufvk string) (string, error
 
 	for _, n := range txplan.Notes {
 		req.Notes = append(req.Notes, Note{
-			NoteID:          strings.TrimSpace(n.NoteID),
+			NoteID:          n.NoteID,
 			ActionNullifier: strings.TrimSpace(n.ActionNullifier),
 			CMX:             strings.TrimSpace(n.CMX),
 			Position:        n.Position,
@@ -267,7 +272,23 @@ func ValidateTxPlanV0(txplan types.TxPlan) error {
 	if len(txplan.Notes) > 200 {
 		return fmt.Errorf("%w: notes too large", ErrInvalidPlan)
 	}
+	noteIDs := make(map[string]int, len(txplan.Notes))
 	for i, n := range txplan.Notes {
+		if n.NoteID == "" {
+			return fmt.Errorf("%w: notes[%d].note_id required", ErrInvalidPlan, i)
+		}
+		matches := canonicalNoteIDRegex.FindStringSubmatch(n.NoteID)
+		if matches == nil {
+			return fmt.Errorf("%w: notes[%d].note_id must be lowercase txid:action_index", ErrInvalidPlan, i)
+		}
+		if _, err := strconv.ParseUint(matches[2], 10, 32); err != nil {
+			return fmt.Errorf("%w: notes[%d].note_id action_index must be uint32", ErrInvalidPlan, i)
+		}
+		if first, exists := noteIDs[n.NoteID]; exists {
+			return fmt.Errorf("%w: notes[%d].note_id duplicates notes[%d].note_id", ErrInvalidPlan, i, first)
+		}
+		noteIDs[n.NoteID] = i
+
 		if strings.TrimSpace(n.ActionNullifier) == "" {
 			return fmt.Errorf("%w: notes[%d].action_nullifier required", ErrInvalidPlan, i)
 		}

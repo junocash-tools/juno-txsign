@@ -54,10 +54,18 @@ func TestTxPlanSchemaMatchesRuntimeLimits(t *testing.T) {
 
 	definitions := objectField(t, schema, "$defs")
 	note := objectField(t, definitions, "OrchardSpendNote")
+	noteIDRequired := false
 	for _, required := range asArray(t, field(t, note, "required")) {
 		if asString(t, required) == "note_id" {
-			t.Fatal("diagnostic note_id must remain optional")
+			noteIDRequired = true
 		}
+	}
+	if !noteIDRequired {
+		t.Fatal("note_id must be required")
+	}
+	noteID := objectField(t, objectField(t, note, "properties"), "note_id")
+	if got := asString(t, field(t, noteID, "pattern")); got != `^[0-9a-f]{64}:(0|[1-9][0-9]*)$` {
+		t.Fatalf("note_id pattern = %q", got)
 	}
 }
 

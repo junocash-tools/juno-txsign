@@ -139,6 +139,7 @@
     "OrchardSpendNote": {
       "type": "object",
       "required": [
+        "note_id",
         "action_nullifier",
         "cmx",
         "position",
@@ -149,7 +150,8 @@
       "properties": {
         "note_id": {
           "type": "string",
-          "description": "Optional internal note identifier (for debugging/traceability)"
+          "pattern": "^[0-9a-f]{64}:(0|[1-9][0-9]*)$",
+          "description": "Required stable source-note outpoint and reservation identity: lowercase transaction ID followed by a uint32 Orchard action index"
         },
         "action_nullifier": {
           "type": "string",
