@@ -28,6 +28,12 @@ var newHTTPClient = func() *http.Client {
 	return &http.Client{}
 }
 
+var (
+	signTransaction         = txsign.Sign
+	prepareExternalSigning  = txsign.ExtPrepare
+	finalizeExternalSigning = txsign.ExtFinalize
+)
+
 func Run(args []string) int {
 	return RunWithIO(args, os.Stdout, os.Stderr)
 }
@@ -65,11 +71,11 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(w, "Offline signer for TxPlan v0 packages.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  juno-txsign sign --txplan <path|-> --seed-base64 <b64> [--out <path>] [--json] [--action-indices]")
+	fmt.Fprintln(w, "  juno-txsign sign --txplan <path|-> --seed-base64 <b64> [--out <path>] [--out-result <path>] [--json] [--action-indices]")
 	fmt.Fprintln(w, "  juno-txsign sign-digest --digest <0x32-byte-hex> [--operator-endpoint <url> ...] --json")
 	fmt.Fprintln(w, "  juno-txsign serve --listen <addr>")
-	fmt.Fprintln(w, "  juno-txsign ext-prepare --txplan <path|-> --ufvk <jview...> [--out-prepared <path>] [--out-requests <path>]")
-	fmt.Fprintln(w, "  juno-txsign ext-finalize --prepared-tx <path> --sigs <path> [--out <path>] [--json]")
+	fmt.Fprintln(w, "  juno-txsign ext-prepare --txplan <path|-> --ufvk <jview...> [--out-prepared <path>] [--out-requests <path>] [--out-result <path>]")
+	fmt.Fprintln(w, "  juno-txsign ext-finalize --prepared-tx <path> --sigs <path> [--out <path>] [--out-result <path>] [--json]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Notes:")
 	fmt.Fprintln(w, "  - Do not log or store seeds/spending keys.")
@@ -86,6 +92,7 @@ func runSign(args []string, stdout, stderr io.Writer) int {
 	var seedBase64 string
 	var seedFile string
 	var outPath string
+	var outResultPath string
 	var jsonOut bool
 	var actionIndices bool
 
@@ -93,6 +100,7 @@ func runSign(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&seedBase64, "seed-base64", "", "seed in base64")
 	fs.StringVar(&seedFile, "seed-file", "", "path to file containing base64 seed")
 	fs.StringVar(&outPath, "out", "", "optional path to write raw tx hex")
+	fs.StringVar(&outResultPath, "out-result", "", "optional path to write the JSON result")
 	fs.BoolVar(&jsonOut, "json", false, "JSON output")
 	fs.BoolVar(&actionIndices, "action-indices", false, "include Orchard output action indices (requires --json)")
 
@@ -104,8 +112,13 @@ func runSign(args []string, stdout, stderr io.Writer) int {
 	if txplanPath == "" {
 		return writeErr(stdout, stderr, jsonOut, "invalid_request", "txplan is required")
 	}
+	artifacts, err := prepareExclusiveArtifacts(outPath, outResultPath)
+	if err != nil {
+		return writeErr(stdout, stderr, jsonOut, "io_error", err.Error())
+	}
+	defer abortExclusiveArtifacts(artifacts)
 
-	seedBase64, err := loadSeed(seedBase64, seedFile)
+	seedBase64, err = loadSeed(seedBase64, seedFile)
 	if err != nil {
 		return writeErr(stdout, stderr, jsonOut, "invalid_request", err.Error())
 	}
@@ -118,39 +131,46 @@ func runSign(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	res, err := txsign.Sign(ctx, plan, seedBase64)
+	res, err := signTransaction(ctx, plan, seedBase64)
 	if err != nil {
 		return writeErr(stdout, stderr, jsonOut, "sign_failed", err.Error())
 	}
 
-	if outPath != "" {
-		if err := os.WriteFile(outPath, []byte(res.RawTxHex+"\n"), 0o600); err != nil {
+	data := cliout.SignJSONData(
+		cliout.SignOutput{
+			TxID:                       res.TxID,
+			RawTxHex:                   res.RawTxHex,
+			FeeZat:                     res.FeeZat,
+			OrchardOutputActionIndices: res.OrchardOutputActionIndices,
+			OrchardChangeActionIndex:   res.OrchardChangeActionIndex,
+		},
+		actionIndices,
+	)
+	resultJSON, err := marshalJSONLine(map[string]any{
+		"version": jsonVersionV1,
+		"status":  "ok",
+		"data":    data,
+	})
+	if err != nil {
+		return writeErr(stdout, stderr, jsonOut, "io_error", "marshal signing result")
+	}
+	rawTxLine := []byte(res.RawTxHex + "\n")
+	sealExclusiveArtifacts(artifacts)
+	if artifacts[1] != nil {
+		if err := artifacts[1].commit(resultJSON); err != nil {
+			return writeErr(stdout, stderr, jsonOut, "io_error", err.Error())
+		}
+	}
+	if artifacts[0] != nil {
+		if err := artifacts[0].commit(rawTxLine); err != nil {
 			return writeErr(stdout, stderr, jsonOut, "io_error", err.Error())
 		}
 	}
 
 	if jsonOut {
-		data := cliout.SignJSONData(
-			cliout.SignOutput{
-				TxID:                       res.TxID,
-				RawTxHex:                   res.RawTxHex,
-				FeeZat:                     res.FeeZat,
-				OrchardOutputActionIndices: res.OrchardOutputActionIndices,
-				OrchardChangeActionIndex:   res.OrchardChangeActionIndex,
-			},
-			actionIndices,
-		)
-
-		_ = json.NewEncoder(stdout).Encode(map[string]any{
-			"version": jsonVersionV1,
-			"status":  "ok",
-			"data":    data,
-		})
-		return 0
+		return writeSuccess(stdout, stderr, resultJSON)
 	}
-
-	fmt.Fprintln(stdout, res.RawTxHex)
-	return 0
+	return writeSuccess(stdout, stderr, rawTxLine)
 }
 
 func loadSeed(seedBase64, seedFile string) (string, error) {
@@ -226,7 +246,7 @@ func loadTxPlan(path string) (types.TxPlan, error) {
 
 func writeErr(stdout, stderr io.Writer, jsonOut bool, code, msg string) int {
 	if jsonOut {
-		_ = json.NewEncoder(stdout).Encode(map[string]any{
+		payload, err := marshalJSONLine(map[string]any{
 			"version": jsonVersionV1,
 			"status":  "err",
 			"error": map[string]any{
@@ -234,6 +254,13 @@ func writeErr(stdout, stderr io.Writer, jsonOut bool, code, msg string) int {
 				"message": msg,
 			},
 		})
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, "marshal error response:", err)
+			return 1
+		}
+		if err := writeAll(stdout, payload); err != nil {
+			_, _ = fmt.Fprintln(stderr, "write stdout:", err)
+		}
 		return 1
 	}
 	if msg == "" {
@@ -241,6 +268,22 @@ func writeErr(stdout, stderr io.Writer, jsonOut bool, code, msg string) int {
 	}
 	fmt.Fprintln(stderr, msg)
 	return 1
+}
+
+func marshalJSONLine(value any) ([]byte, error) {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	return append(payload, '\n'), nil
+}
+
+func writeSuccess(stdout, stderr io.Writer, payload []byte) int {
+	if err := writeAll(stdout, payload); err != nil {
+		_, _ = fmt.Fprintln(stderr, "write stdout:", err)
+		return 1
+	}
+	return 0
 }
 
 func runExtPrepare(args []string, stdout, stderr io.Writer) int {
@@ -252,12 +295,14 @@ func runExtPrepare(args []string, stdout, stderr io.Writer) int {
 	var ufvkFile string
 	var outPrepared string
 	var outRequests string
+	var outResultPath string
 
 	fs.StringVar(&txplanPath, "txplan", "", "path to TxPlan JSON (or - for stdin)")
 	fs.StringVar(&ufvk, "ufvk", "", "unified full viewing key (jview...)")
 	fs.StringVar(&ufvkFile, "ufvk-file", "", "path to file containing UFVK")
 	fs.StringVar(&outPrepared, "out-prepared", "", "optional path to write prepared tx JSON")
 	fs.StringVar(&outRequests, "out-requests", "", "optional path to write signing requests JSON")
+	fs.StringVar(&outResultPath, "out-result", "", "optional path to write the JSON result")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(stderr, err.Error())
@@ -268,8 +313,13 @@ func runExtPrepare(args []string, stdout, stderr io.Writer) int {
 	if txplanPath == "" {
 		return writeErr(stdout, stderr, true, "invalid_request", "txplan is required")
 	}
+	artifacts, err := prepareExclusiveArtifacts(outPrepared, outRequests, outResultPath)
+	if err != nil {
+		return writeErr(stdout, stderr, true, "io_error", err.Error())
+	}
+	defer abortExclusiveArtifacts(artifacts)
 
-	ufvk, err := loadUFVK(ufvk, ufvkFile)
+	ufvk, err = loadUFVK(ufvk, ufvkFile)
 	if err != nil {
 		return writeErr(stdout, stderr, true, "invalid_request", err.Error())
 	}
@@ -282,32 +332,20 @@ func runExtPrepare(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	res, err := txsign.ExtPrepare(ctx, plan, ufvk)
+	res, err := prepareExternalSigning(ctx, plan, ufvk)
 	if err != nil {
 		return writeErr(stdout, stderr, true, "prepare_failed", err.Error())
-	}
-
-	if outPrepared != "" {
-		if err := os.WriteFile(outPrepared, append(res.PreparedTx, '\n'), 0o600); err != nil {
-			return writeErr(stdout, stderr, true, "io_error", err.Error())
-		}
-	}
-	if outRequests != "" {
-		b, err := json.Marshal(res.SigningRequests)
-		if err != nil {
-			return writeErr(stdout, stderr, true, "io_error", "marshal signing requests")
-		}
-		if err := os.WriteFile(outRequests, append(b, '\n'), 0o600); err != nil {
-			return writeErr(stdout, stderr, true, "io_error", err.Error())
-		}
 	}
 
 	var preparedAny any
 	if err := json.Unmarshal(res.PreparedTx, &preparedAny); err != nil {
 		return writeErr(stdout, stderr, true, "prepare_failed", "invalid prepared tx")
 	}
-
-	_ = json.NewEncoder(stdout).Encode(map[string]any{
+	requestsJSON, err := marshalJSONLine(res.SigningRequests)
+	if err != nil {
+		return writeErr(stdout, stderr, true, "io_error", "marshal signing requests")
+	}
+	resultJSON, err := marshalJSONLine(map[string]any{
 		"version": jsonVersionV1,
 		"status":  "ok",
 		"data": map[string]any{
@@ -315,7 +353,19 @@ func runExtPrepare(args []string, stdout, stderr io.Writer) int {
 			"signing_requests": res.SigningRequests,
 		},
 	})
-	return 0
+	if err != nil {
+		return writeErr(stdout, stderr, true, "io_error", "marshal prepare result")
+	}
+	preparedJSON := append(append([]byte(nil), res.PreparedTx...), '\n')
+	sealExclusiveArtifacts(artifacts)
+	for i, payload := range [][]byte{preparedJSON, requestsJSON, resultJSON} {
+		if artifacts[i] != nil {
+			if err := artifacts[i].commit(payload); err != nil {
+				return writeErr(stdout, stderr, true, "io_error", err.Error())
+			}
+		}
+	}
+	return writeSuccess(stdout, stderr, resultJSON)
 }
 
 func runSignDigest(args []string, stdout, stderr io.Writer) int {
@@ -346,33 +396,33 @@ func runSignDigest(args []string, stdout, stderr io.Writer) int {
 
 	digestHex = strings.TrimSpace(digestHex)
 	if digestHex == "" {
-		return writeSignDigestErr(stdout, "invalid_request", "digest is required", 2)
+		return writeSignDigestErr(stdout, stderr, "invalid_request", "digest is required", 2)
 	}
 
 	digest, err := digestsign.ParseDigestHex(digestHex)
 	if err != nil {
-		return writeSignDigestErr(stdout, "invalid_request", err.Error(), 1)
+		return writeSignDigestErr(stdout, stderr, "invalid_request", err.Error(), 1)
 	}
 
 	keys, err := digestsign.LoadSignerKeysFromEnv()
 	if err != nil {
-		return writeSignDigestErr(stdout, "sign_failed", err.Error(), 1)
+		return writeSignDigestErr(stdout, stderr, "sign_failed", err.Error(), 1)
 	}
 
 	sigs, err := digestsign.SignDigest(digest, keys)
 	if err != nil {
-		return writeSignDigestErr(stdout, "sign_failed", err.Error(), 1)
+		return writeSignDigestErr(stdout, stderr, "sign_failed", err.Error(), 1)
 	}
 
 	for i, endpoint := range operatorEndpoints {
 		if _, err := digestsign.ParseOperatorEndpoint(endpoint); err != nil {
-			return writeSignDigestErr(stdout, "invalid_request", fmt.Sprintf("operator endpoint %d: %s", i+1, err.Error()), 1)
+			return writeSignDigestErr(stdout, stderr, "invalid_request", fmt.Sprintf("operator endpoint %d: %s", i+1, err.Error()), 1)
 		}
 	}
 
 	remoteSigSets, err := digestsign.CollectRemoteSignatures(context.Background(), digest, operatorEndpoints, newHTTPClient())
 	if err != nil {
-		return writeSignDigestErr(stdout, "sign_failed", err.Error(), 1)
+		return writeSignDigestErr(stdout, stderr, "sign_failed", err.Error(), 1)
 	}
 	if len(remoteSigSets) > 0 {
 		signatureSets := make([][]string, 0, len(remoteSigSets)+1)
@@ -380,7 +430,7 @@ func runSignDigest(args []string, stdout, stderr io.Writer) int {
 		signatureSets = append(signatureSets, remoteSigSets...)
 		sigs, err = digestsign.MergeSignatureSets(digest, signatureSets...)
 		if err != nil {
-			return writeSignDigestErr(stdout, "sign_failed", err.Error(), 1)
+			return writeSignDigestErr(stdout, stderr, "sign_failed", err.Error(), 1)
 		}
 	}
 
@@ -392,14 +442,18 @@ func runSignDigest(args []string, stdout, stderr io.Writer) int {
 		Status  string         `json:"status"`
 		Data    signDigestData `json:"data"`
 	}
-	_ = json.NewEncoder(stdout).Encode(signDigestOK{
+	payload, err := marshalJSONLine(signDigestOK{
 		Version: jsonVersionV1,
 		Status:  "ok",
 		Data: signDigestData{
 			Signatures: sigs,
 		},
 	})
-	return 0
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "marshal signing result:", err)
+		return 1
+	}
+	return writeSuccess(stdout, stderr, payload)
 }
 
 func runServe(args []string, stdout, stderr io.Writer) int {
@@ -509,7 +563,7 @@ func (f *stringListFlag) Set(v string) error {
 	return nil
 }
 
-func writeSignDigestErr(stdout io.Writer, code, msg string, exitCode int) int {
+func writeSignDigestErr(stdout, stderr io.Writer, code, msg string, exitCode int) int {
 	type errBody struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
@@ -519,7 +573,7 @@ func writeSignDigestErr(stdout io.Writer, code, msg string, exitCode int) int {
 		Status  string  `json:"status"`
 		Error   errBody `json:"error"`
 	}
-	_ = json.NewEncoder(stdout).Encode(signDigestErr{
+	payload, err := marshalJSONLine(signDigestErr{
 		Version: jsonVersionV1,
 		Status:  "err",
 		Error: errBody{
@@ -527,6 +581,13 @@ func writeSignDigestErr(stdout io.Writer, code, msg string, exitCode int) int {
 			Message: msg,
 		},
 	})
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "marshal error response:", err)
+		return exitCode
+	}
+	if err := writeAll(stdout, payload); err != nil {
+		_, _ = fmt.Fprintln(stderr, "write stdout:", err)
+	}
 	return exitCode
 }
 
@@ -537,12 +598,14 @@ func runExtFinalize(args []string, stdout, stderr io.Writer) int {
 	var preparedPath string
 	var sigsPath string
 	var outPath string
+	var outResultPath string
 	var jsonOut bool
 	var actionIndices bool
 
 	fs.StringVar(&preparedPath, "prepared-tx", "", "path to prepared tx JSON")
 	fs.StringVar(&sigsPath, "sigs", "", "path to spend-auth signature submission JSON")
 	fs.StringVar(&outPath, "out", "", "optional path to write raw tx hex")
+	fs.StringVar(&outResultPath, "out-result", "", "optional path to write the JSON result")
 	fs.BoolVar(&jsonOut, "json", false, "JSON output")
 	fs.BoolVar(&actionIndices, "action-indices", false, "unsupported legacy flag")
 
@@ -568,6 +631,11 @@ func runExtFinalize(args []string, stdout, stderr io.Writer) int {
 	if sigsPath == "" {
 		return writeErr(stdout, stderr, jsonOut, "invalid_request", "sigs is required")
 	}
+	artifacts, err := prepareExclusiveArtifacts(outPath, outResultPath)
+	if err != nil {
+		return writeErr(stdout, stderr, jsonOut, "io_error", err.Error())
+	}
+	defer abortExclusiveArtifacts(artifacts)
 
 	preparedRaw, err := os.ReadFile(preparedPath)
 	if err != nil {
@@ -590,30 +658,38 @@ func runExtFinalize(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	res, err := txsign.ExtFinalize(ctx, preparedRaw, sigs)
+	res, err := finalizeExternalSigning(ctx, preparedRaw, sigs)
 	if err != nil {
 		return writeErr(stdout, stderr, jsonOut, "finalize_failed", err.Error())
 	}
 
-	if outPath != "" {
-		if err := os.WriteFile(outPath, []byte(res.RawTxHex+"\n"), 0o600); err != nil {
+	resultJSON, err := marshalJSONLine(map[string]any{
+		"version": jsonVersionV1,
+		"status":  "ok",
+		"data": map[string]any{
+			"txid":       res.TxID,
+			"raw_tx_hex": res.RawTxHex,
+			"fee_zat":    res.FeeZat,
+		},
+	})
+	if err != nil {
+		return writeErr(stdout, stderr, jsonOut, "io_error", "marshal finalize result")
+	}
+	rawTxLine := []byte(res.RawTxHex + "\n")
+	sealExclusiveArtifacts(artifacts)
+	if artifacts[1] != nil {
+		if err := artifacts[1].commit(resultJSON); err != nil {
+			return writeErr(stdout, stderr, jsonOut, "io_error", err.Error())
+		}
+	}
+	if artifacts[0] != nil {
+		if err := artifacts[0].commit(rawTxLine); err != nil {
 			return writeErr(stdout, stderr, jsonOut, "io_error", err.Error())
 		}
 	}
 
 	if jsonOut {
-		_ = json.NewEncoder(stdout).Encode(map[string]any{
-			"version": jsonVersionV1,
-			"status":  "ok",
-			"data": map[string]any{
-				"txid":       res.TxID,
-				"raw_tx_hex": res.RawTxHex,
-				"fee_zat":    res.FeeZat,
-			},
-		})
-		return 0
+		return writeSuccess(stdout, stderr, resultJSON)
 	}
-
-	fmt.Fprintln(stdout, res.RawTxHex)
-	return 0
+	return writeSuccess(stdout, stderr, rawTxLine)
 }
