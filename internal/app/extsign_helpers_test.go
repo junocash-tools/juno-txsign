@@ -94,6 +94,7 @@ func writeTxPlanSendViaTxbuild(t *testing.T, ctx context.Context, txbuild string
 		"--to", toAddr,
 		"--amount-zat", amountZat,
 		"--change-address", changeAddr,
+		"--minconf", "1",
 		"--out", outPath,
 	)
 	if b, err := cmd.CombinedOutput(); err != nil {

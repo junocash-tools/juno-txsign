@@ -34,6 +34,44 @@ func TestRunSign_JSONErrorIncludesVersion(t *testing.T) {
 	}
 }
 
+func TestUsageLimitsActionIndicesToDirectSign(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	if code := RunWithIO([]string{"--help"}, &out, &errBuf); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, errBuf.String())
+	}
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.Contains(line, "ext-finalize") && strings.Contains(line, "--action-indices") {
+			t.Fatalf("ext-finalize advertises unauthenticated action mappings: %q", line)
+		}
+	}
+}
+
+func TestRunExtFinalizeRejectsActionIndices(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	code := RunWithIO([]string{"ext-finalize", "--json", "--action-indices"}, &out, &errBuf)
+	if code != 1 {
+		t.Fatalf("code=%d want=1", code)
+	}
+	if errBuf.Len() != 0 {
+		t.Fatalf("unexpected stderr: %q", errBuf.String())
+	}
+
+	var resp struct {
+		Status string `json:"status"`
+		Error  struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if resp.Status != "err" || resp.Error.Code != "invalid_request" ||
+		!strings.Contains(resp.Error.Message, "integrity-bound ext-prepare artifact") {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
+
 func TestRunSignDigest_UsageRequiresJSON(t *testing.T) {
 	t.Setenv(digestsign.EnvSignerKeys, "4c0883a69102937d6231471b5dbb6204fe512961708279f3136f8f5d7f7f5f5a")
 

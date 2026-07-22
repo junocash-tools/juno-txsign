@@ -14,9 +14,26 @@ type UnspentOrchardNote struct {
 	TxID      string
 	OutIndex  uint32
 	AmountZat uint64
+	Account   uint32
+	Address   string
 }
 
 func ListUnspentOrchard(ctx context.Context, jd *containers.Junocashd, minConf int64, account uint32) ([]UnspentOrchardNote, error) {
+	notes, err := ListAllUnspentOrchard(ctx, jd, minConf)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]UnspentOrchardNote, 0, len(notes))
+	for _, note := range notes {
+		if note.Account == account {
+			out = append(out, note)
+		}
+	}
+	return out, nil
+}
+
+func ListAllUnspentOrchard(ctx context.Context, jd *containers.Junocashd, minConf int64) ([]UnspentOrchardNote, error) {
 	if jd == nil {
 		return nil, errors.New("junocashd: nil container")
 	}
@@ -25,13 +42,17 @@ func ListUnspentOrchard(ctx context.Context, jd *containers.Junocashd, minConf i
 	if err != nil {
 		return nil, err
 	}
+	return parseUnspentOrchard(raw)
+}
 
+func parseUnspentOrchard(raw []byte) ([]UnspentOrchardNote, error) {
 	var notes []struct {
 		TxID      string      `json:"txid"`
 		Pool      string      `json:"pool"`
 		OutIndex  uint32      `json:"outindex"`
 		Spendable bool        `json:"spendable"`
 		Account   *uint32     `json:"account,omitempty"`
+		Address   string      `json:"address"`
 		Amount    json.Number `json:"amount"`
 	}
 	if err := json.Unmarshal(raw, &notes); err != nil {
@@ -46,13 +67,14 @@ func ListUnspentOrchard(ctx context.Context, jd *containers.Junocashd, minConf i
 		if !n.Spendable {
 			continue
 		}
-		if n.Account != nil && *n.Account != account {
-			continue
+		if n.Account == nil {
+			return nil, errors.New("z_listunspent: spendable Orchard note missing account")
 		}
 		txid := strings.ToLower(strings.TrimSpace(n.TxID))
 		if txid == "" {
-			continue
+			return nil, errors.New("z_listunspent: spendable Orchard note missing txid")
 		}
+		address := strings.TrimSpace(n.Address)
 
 		zat, err := parseZECToZat(n.Amount.String())
 		if err != nil {
@@ -63,6 +85,8 @@ func ListUnspentOrchard(ctx context.Context, jd *containers.Junocashd, minConf i
 			TxID:      txid,
 			OutIndex:  n.OutIndex,
 			AmountZat: zat,
+			Account:   *n.Account,
+			Address:   address,
 		})
 	}
 

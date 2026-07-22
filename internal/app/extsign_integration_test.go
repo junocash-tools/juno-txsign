@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Abdullah1738/juno-sdk-go/types"
 	"github.com/Abdullah1738/juno-txsign/pkg/txsign"
 )
 
@@ -22,6 +23,7 @@ func TestIntegration_ExtPrepareThenFinalize(t *testing.T) {
 	changeAddr := unifiedAddress(t, jd, 0)
 	mineAndShieldOnce(t, jd, changeAddr)
 	toAddr := unifiedAddress(t, jd, 0)
+	foreignChangeAddr := newUnifiedAddressForDifferentAccount(t, jd, 0).Address
 
 	ufvk := exportUFVK(t, jd, toAddr)
 	seeds := seedCandidatesFromNode(t, jd)
@@ -42,6 +44,45 @@ func TestIntegration_ExtPrepareThenFinalize(t *testing.T) {
 		t.Fatalf("txplan invalid: %v", err)
 	}
 
+	t.Run("rejects_foreign_change_address", func(t *testing.T) {
+		foreignPlan := plan
+		foreignPlan.ChangeAddress = foreignChangeAddr
+		_, err := txsign.ExtPrepare(ctx, foreignPlan, ufvk)
+		if err == nil || !strings.Contains(err.Error(), "change_address_not_owned") {
+			t.Fatalf("expected change ownership error, got %v", err)
+		}
+	})
+
+	t.Run("allows_foreign_destination_without_change", func(t *testing.T) {
+		sweepPlan := buildSingleNoteSweepPlan(t, rpc, jd, foreignChangeAddr, foreignChangeAddr)
+		prepared, err := txsign.ExtPrepare(ctx, sweepPlan, ufvk)
+		if err != nil {
+			t.Fatalf("ext-prepare no-change sweep: %v", err)
+		}
+		var envelope struct {
+			OrchardChangeActionIndex *uint32 `json:"orchard_change_action_index"`
+		}
+		if err := json.Unmarshal(prepared.PreparedTx, &envelope); err != nil {
+			t.Fatalf("decode prepared tx: %v", err)
+		}
+		if envelope.OrchardChangeActionIndex != nil {
+			t.Fatalf("unexpected change action index: %d", *envelope.OrchardChangeActionIndex)
+		}
+	})
+
+	t.Run("rejects_implicit_201st_output", func(t *testing.T) {
+		tooMany := plan
+		tooMany.Outputs = make([]types.TxOutput, 200)
+		for i := range tooMany.Outputs {
+			tooMany.Outputs[i] = types.TxOutput{ToAddress: toAddr, AmountZat: "1"}
+		}
+		tooMany.FeeZat = "1000000"
+		_, err := txsign.ExtPrepare(ctx, tooMany, ufvk)
+		if err == nil || !strings.Contains(err.Error(), "outputs_invalid") {
+			t.Fatalf("expected total-output limit error, got %v", err)
+		}
+	})
+
 	res, err := txsign.ExtPrepare(ctx, plan, ufvk)
 	if err != nil {
 		t.Fatalf("ext-prepare: %v", err)
@@ -50,13 +91,20 @@ func TestIntegration_ExtPrepareThenFinalize(t *testing.T) {
 	if len(res.SigningRequests.Requests) != len(plan.Notes) {
 		t.Fatalf("signing request count mismatch: got %d want %d", len(res.SigningRequests.Requests), len(plan.Notes))
 	}
+	var preparedMetadata struct {
+		OrchardOutputActionIndices []uint32 `json:"orchard_output_action_indices"`
+		OrchardChangeActionIndex   *uint32  `json:"orchard_change_action_index"`
+	}
+	if err := json.Unmarshal(res.PreparedTx, &preparedMetadata); err != nil {
+		t.Fatalf("decode prepared tx metadata: %v", err)
+	}
 
 	writeSigningRequests(t, requestsPath, res.SigningRequests)
 
 	signer := spendAuthSignerBin(t)
 
 	var (
-		finalized txsign.Result
+		finalized txsign.ExtFinalizeResult
 		lastErr   error
 	)
 	for _, seed := range seeds {
@@ -102,8 +150,8 @@ ok:
 		t.Fatalf("raw tx hex invalid")
 	}
 
-	if len(finalized.OrchardOutputActionIndices) != len(plan.Outputs) {
-		t.Fatalf("orchard output index count mismatch: got %d want %d", len(finalized.OrchardOutputActionIndices), len(plan.Outputs))
+	if len(preparedMetadata.OrchardOutputActionIndices) != len(plan.Outputs) {
+		t.Fatalf("orchard output index count mismatch: got %d want %d", len(preparedMetadata.OrchardOutputActionIndices), len(plan.Outputs))
 	}
 
 	var decoded struct {
@@ -118,7 +166,7 @@ ok:
 	// Expected action count matches ZIP-317 fee model:
 	// actions = max(2, max(spends, outputs)), where outputs includes change.
 	outputCount := len(plan.Outputs)
-	if finalized.OrchardChangeActionIndex != nil {
+	if preparedMetadata.OrchardChangeActionIndex != nil {
 		outputCount++
 	}
 	wantActions := outputCount
@@ -133,7 +181,7 @@ ok:
 	}
 
 	seen := make(map[uint32]struct{})
-	for _, idx := range finalized.OrchardOutputActionIndices {
+	for _, idx := range preparedMetadata.OrchardOutputActionIndices {
 		if int(idx) >= len(decoded.Orchard.Actions) {
 			t.Fatalf("orchard output action index out of range: %d", idx)
 		}
@@ -142,8 +190,8 @@ ok:
 		}
 		seen[idx] = struct{}{}
 	}
-	if finalized.OrchardChangeActionIndex != nil {
-		idx := *finalized.OrchardChangeActionIndex
+	if preparedMetadata.OrchardChangeActionIndex != nil {
+		idx := *preparedMetadata.OrchardChangeActionIndex
 		if int(idx) >= len(decoded.Orchard.Actions) {
 			t.Fatalf("orchard change action index out of range: %d", idx)
 		}

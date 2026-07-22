@@ -43,7 +43,9 @@ type ExtPrepareRequest struct {
 }
 
 type Note struct {
-	NoteID          string   `json:"note_id,omitempty"`
+	NoteID string `json:"note_id,omitempty"`
+	// ActionNullifier is from the action that created this note, not the
+	// nullifier later derived when spending it.
 	ActionNullifier string   `json:"action_nullifier"`
 	CMX             string   `json:"cmx"`
 	Position        uint32   `json:"position"`
@@ -195,7 +197,7 @@ func ValidateTxPlanV0(txplan types.TxPlan) error {
 		return fmt.Errorf("%w: coin_type required", ErrInvalidPlan)
 	}
 	switch strings.ToLower(strings.TrimSpace(txplan.Chain)) {
-	case "main":
+	case "main", "mainnet":
 		if txplan.CoinType != 8133 {
 			return fmt.Errorf("%w: coin_type must be 8133 on main", ErrInvalidPlan)
 		}
@@ -261,6 +263,9 @@ func ValidateTxPlanV0(txplan types.TxPlan) error {
 	}
 	if len(txplan.Notes) == 0 {
 		return fmt.Errorf("%w: notes required", ErrInvalidPlan)
+	}
+	if len(txplan.Notes) > 200 {
+		return fmt.Errorf("%w: notes too large", ErrInvalidPlan)
 	}
 	for i, n := range txplan.Notes {
 		if strings.TrimSpace(n.ActionNullifier) == "" {

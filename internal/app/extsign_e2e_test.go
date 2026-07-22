@@ -9,12 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/Abdullah1738/juno-txsign/internal/testutil/junocashdutil"
 )
 
 func TestE2E_ExtPrepareFinalizeThenBroadcastAndMine(t *testing.T) {
@@ -60,6 +57,17 @@ func TestE2E_ExtPrepareFinalizeThenBroadcastAndMine(t *testing.T) {
 		}
 		t.Fatalf("juno-txsign ext-prepare: %v", err)
 	}
+	preparedRaw, err := os.ReadFile(preparedPath)
+	if err != nil {
+		t.Fatalf("read prepared tx: %v", err)
+	}
+	var preparedMetadata struct {
+		OrchardOutputActionIndices []uint32 `json:"orchard_output_action_indices"`
+		OrchardChangeActionIndex   *uint32  `json:"orchard_change_action_index"`
+	}
+	if err := json.Unmarshal(preparedRaw, &preparedMetadata); err != nil {
+		t.Fatalf("prepared tx JSON invalid: %v", err)
+	}
 
 	requestsRaw, err := os.ReadFile(requestsPath)
 	if err != nil {
@@ -80,10 +88,8 @@ func TestE2E_ExtPrepareFinalizeThenBroadcastAndMine(t *testing.T) {
 	}
 
 	type signResult struct {
-		TxID                       string
-		RawTxHex                   string
-		OrchardOutputActionIndices []uint32
-		OrchardChangeActionIndex   *uint32
+		TxID     string
+		RawTxHex string
 	}
 
 	var (
@@ -105,7 +111,6 @@ func TestE2E_ExtPrepareFinalizeThenBroadcastAndMine(t *testing.T) {
 			"--prepared-tx", preparedPath,
 			"--sigs", sigsPath,
 			"--json",
-			"--action-indices",
 		)
 		out, err := finalize.Output()
 		if err != nil {
@@ -116,13 +121,26 @@ func TestE2E_ExtPrepareFinalizeThenBroadcastAndMine(t *testing.T) {
 		var resp struct {
 			Status string `json:"status"`
 			Data   struct {
-				TxID                       string   `json:"txid"`
-				RawTxHex                   string   `json:"raw_tx_hex"`
-				OrchardOutputActionIndices []uint32 `json:"orchard_output_action_indices"`
-				OrchardChangeActionIndex   *uint32  `json:"orchard_change_action_index"`
+				TxID     string `json:"txid"`
+				RawTxHex string `json:"raw_tx_hex"`
 			} `json:"data"`
 		}
 		decodeJSON(t, out, &resp)
+		var rawEnvelope map[string]any
+		decodeJSON(t, out, &rawEnvelope)
+		data, ok := rawEnvelope["data"].(map[string]any)
+		if !ok {
+			lastErr = errors.New("missing data")
+			continue
+		}
+		if _, ok := data["orchard_output_action_indices"]; ok {
+			lastErr = errors.New("ext-finalize echoed output action indices")
+			continue
+		}
+		if _, ok := data["orchard_change_action_index"]; ok {
+			lastErr = errors.New("ext-finalize echoed change action index")
+			continue
+		}
 		if resp.Status != "ok" {
 			lastErr = errors.New("unexpected status")
 			continue
@@ -132,10 +150,8 @@ func TestE2E_ExtPrepareFinalizeThenBroadcastAndMine(t *testing.T) {
 			continue
 		}
 		res = signResult{
-			TxID:                       resp.Data.TxID,
-			RawTxHex:                   resp.Data.RawTxHex,
-			OrchardOutputActionIndices: resp.Data.OrchardOutputActionIndices,
-			OrchardChangeActionIndex:   resp.Data.OrchardChangeActionIndex,
+			TxID:     resp.Data.TxID,
+			RawTxHex: resp.Data.RawTxHex,
 		}
 		lastErr = nil
 		goto ok
@@ -144,6 +160,8 @@ ok:
 	if lastErr != nil {
 		t.Fatalf("ext-finalize: %v", lastErr)
 	}
+	assertDecodedOrchardTransaction(t, ctx, rpc, res.RawTxHex, res.TxID, plan, preparedMetadata.OrchardOutputActionIndices, preparedMetadata.OrchardChangeActionIndex)
+	totalInput := orchardPlanInputValue(t, ctx, jd, 0, plan)
 
 	var acceptedTxID string
 	if err := rpc.Call(ctx, "sendrawtransaction", []any{res.RawTxHex}, &acceptedTxID); err != nil {
@@ -173,60 +191,6 @@ ok:
 		t.Fatalf("tx not mined")
 	}
 
-	waitSpendableOrchardNoteNot(t, jd, plan.Notes[0].NoteID)
-
-	// Verify Orchard action indices match the notes the node wallet sees for this tx.
-	if len(res.OrchardOutputActionIndices) != len(plan.Outputs) {
-		t.Fatalf("orchard output index count mismatch: got %d want %d", len(res.OrchardOutputActionIndices), len(plan.Outputs))
-	}
-
-	notes, err := junocashdutil.ListUnspentOrchard(ctx, jd, 1, 0)
-	if err != nil {
-		t.Fatalf("z_listunspent: %v", err)
-	}
-	var txNotes []junocashdutil.UnspentOrchardNote
-	for _, n := range notes {
-		if strings.EqualFold(n.TxID, res.TxID) {
-			txNotes = append(txNotes, n)
-		}
-	}
-	if len(txNotes) == 0 {
-		t.Fatalf("expected unspent orchard notes for tx")
-	}
-
-	for i := range plan.Outputs {
-		amt, err := strconv.ParseUint(strings.TrimSpace(plan.Outputs[i].AmountZat), 10, 64)
-		if err != nil {
-			t.Fatalf("outputs[%d].amount_zat invalid: %v", i, err)
-		}
-		wantIdx := res.OrchardOutputActionIndices[i]
-
-		var ok bool
-		for _, n := range txNotes {
-			if n.OutIndex == wantIdx && n.AmountZat == amt {
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			t.Fatalf("missing orchard note for outputs[%d] at action_index=%d", i, wantIdx)
-		}
-	}
-
-	if res.OrchardChangeActionIndex != nil {
-		wantIdx := *res.OrchardChangeActionIndex
-		var ok bool
-		for _, n := range txNotes {
-			if n.OutIndex == wantIdx {
-				if n.AmountZat == 0 {
-					t.Fatalf("change note amount is 0")
-				}
-				ok = true
-				break
-			}
-		}
-		if !ok {
-			t.Fatalf("missing orchard change note at action_index=%d", wantIdx)
-		}
-	}
+	outputAccounts := make([]uint32, len(plan.Outputs))
+	waitForOrchardPlanEffects(t, ctx, jd, res.TxID, 0, totalInput, plan, preparedMetadata.OrchardOutputActionIndices, outputAccounts, preparedMetadata.OrchardChangeActionIndex, 0)
 }

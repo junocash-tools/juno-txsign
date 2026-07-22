@@ -8,6 +8,8 @@
     "requests": {
       "type": "array",
       "minItems": 1,
+      "maxItems": 200,
+      "uniqueItems": true,
       "items": { "$ref": "#/$defs/SigningRequestV0" }
     }
   },
@@ -18,7 +20,7 @@
       "required": ["sighash", "action_index", "alpha", "rk"],
       "properties": {
         "sighash": { "$ref": "#/$defs/Hex32" },
-        "action_index": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "action_index": { "type": "integer", "minimum": 0, "maximum": 199 },
         "alpha": { "$ref": "#/$defs/Hex32" },
         "rk": { "$ref": "#/$defs/Hex32" }
       },

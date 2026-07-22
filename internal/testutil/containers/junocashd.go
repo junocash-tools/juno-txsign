@@ -60,6 +60,7 @@ func StartJunocashd(ctx context.Context) (*Junocashd, error) {
 			"-txunpaidactionlimit=10000",
 			"-blockunpaidactionlimit=0",
 			"-txexpirydelta=4",
+			"-nuparams=5437f330:1",
 			"-blockmintxfee=0",
 			"-datadir=/data",
 			"-rpcbind=0.0.0.0",

@@ -59,8 +59,11 @@ Two-phase flow:
 
 1. Prepare a transaction and get signing requests:
    - `juno-txsign ext-prepare --txplan ./txplan.json --ufvk <jview...> --out-prepared ./prepared.json --out-requests ./requests.json`
-2. Finalize with externally-produced spend-auth signatures:
+2. Persist the exact `prepared.json` bytes and record their SHA-256 digest in a trusted, integrity-protected system before distributing signing requests. Rehash and compare those exact bytes before using the output/change action mappings. These mappings are coordination metadata and are not authenticated by Orchard spend-auth signatures.
+3. Finalize with externally-produced spend-auth signatures:
    - `juno-txsign ext-finalize --prepared-tx ./prepared.json --sigs ./sigs.json --out ./rawtx.hex`
+
+Only use action mappings from the digest-bound `ext-prepare` artifact. `ext-finalize` deliberately does not return them because it cannot authenticate their semantic roles.
 
 Run `juno-txsign --help` for the complete flag reference.
 
@@ -87,7 +90,7 @@ export LD_LIBRARY_PATH="$PWD/rust/juno-tx/target/release:$PWD/rust/witness/targe
 - `--out <path>` writes the raw tx hex with a trailing newline (mode `0600`)
 - `--json` envelope:
   - success: `{"version":"v1","status":"ok","data":{"txid":"...","raw_tx_hex":"...","fee_zat":"..."}}`
-    - with `--action-indices`, `data` also includes:
+    - for direct `sign`, `--action-indices` also includes:
       - `orchard_output_action_indices`: array of Orchard action indices aligned to `txplan.outputs` order
       - `orchard_change_action_index`: Orchard action index for the change output, or `null` if no change output was created
   - error: `{"version":"v1","status":"err","error":{"code":"...","message":"..."}}`
@@ -98,7 +101,8 @@ export LD_LIBRARY_PATH="$PWD/rust/juno-tx/target/release:$PWD/rust/witness/targe
   - success: `{"version":"v1","status":"ok","data":{"prepared_tx":<PreparedTx>,"signing_requests":<SigningRequests>}}`
 - `ext-finalize` output:
   - default stdout: raw tx hex (one line)
-  - with `--json`: same envelope as `sign` (includes `txid`, `raw_tx_hex`, `fee_zat`, and optional Orchard action indices)
+  - with `--json`: includes only `txid`, `raw_tx_hex`, and `fee_zat`
+  - `--action-indices` is rejected; use the integrity-bound `ext-prepare` artifact
 
 ### sign-digest JSON
 
@@ -106,6 +110,14 @@ export LD_LIBRARY_PATH="$PWD/rust/juno-tx/target/release:$PWD/rust/witness/targe
 - error: `{"version":"v1","status":"err","error":{"code":"<machine_code>","message":"<human_message>"}}`
 
 For `sign-digest`, each signature is `r || s || v` (65 bytes), with `v` in `{27,28}` and canonical low-`s`. Output signatures are sorted by recovered signer address ascending and guaranteed unique across local plus remote operators.
+
+## Network and change safety
+
+- TxPlan `chain` and `coin_type` must match: mainnet `8133`, testnet `8134`, or regtest `8135`.
+- Every recipient, change address, and external-signing UFVK must use that network's exact HRP.
+- Any actual change output must belong to the direct signer's seed-derived FVK or the UFVK supplied to `ext-prepare`. External and internal Orchard scopes are accepted. A no-change sweep may send its full value to another wallet.
+- `ext-prepare` requires the NU6.2 transaction branch. Earlier branches are rejected with `external_signing_branch_unsupported` because the current Orchard PCZT prover constructs NU6.2 circuits. Direct `sign` remains branch-aware for supported earlier branches. The Docker regtest fixture activates NU6.2 at height 1.
+- A transaction may contain at most 200 Orchard spends and 200 Orchard outputs, including change. External-signing action indices are therefore limited to `0..199`.
 
 ## Fees
 

@@ -19,17 +19,24 @@
     "fee_zat": { "type": "string", "pattern": "^[0-9]+$" },
     "orchard_output_action_indices": {
       "type": "array",
-      "items": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+      "minItems": 1,
+      "maxItems": 200,
+      "uniqueItems": true,
+      "description": "ext-prepare coordination metadata aligned to TxPlan outputs; preserve with an integrity-protected digest because Orchard signatures do not authenticate semantic roles",
+      "items": { "type": "integer", "minimum": 0, "maximum": 199 }
     },
     "orchard_change_action_index": {
       "type": ["integer", "null"],
       "minimum": 0,
-      "maximum": 4294967295
+      "maximum": 199,
+      "description": "ext-prepare coordination metadata for change; preserve with the same integrity-protected PreparedTx artifact"
     },
     "orchard_required_spend_action_indices": {
       "type": "array",
       "minItems": 1,
-      "items": { "type": "integer", "minimum": 0, "maximum": 4294967295 }
+      "maxItems": 200,
+      "uniqueItems": true,
+      "items": { "type": "integer", "minimum": 0, "maximum": 199 }
     },
     "orchard_pczt": { "$ref": "#/$defs/OrchardPcztBundleV0" }
   },
@@ -44,6 +51,7 @@
         "actions": {
           "type": "array",
           "minItems": 2,
+          "maxItems": 200,
           "items": { "$ref": "#/$defs/OrchardPcztActionV0" }
         },
         "flags": { "type": "integer", "minimum": 0, "maximum": 255 },
@@ -96,6 +104,20 @@
       "additionalProperties": false
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "orchard_change_action_index": { "type": "integer" }
+        },
+        "required": ["orchard_change_action_index"]
+      },
+      "then": {
+        "properties": {
+          "orchard_output_action_indices": { "maxItems": 199 }
+        }
+      }
+    }
+  ],
   "additionalProperties": false
 }
-

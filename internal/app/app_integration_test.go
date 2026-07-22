@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,14 +22,49 @@ func TestIntegration_SignAndBuildRawTx(t *testing.T) {
 
 	seeds := seedCandidatesFromNode(t, jd)
 	planWithdrawal := buildSingleNoteWithdrawalPlan(t, rpc, jd, toAddr, changeAddr, 1_000_000)
+	foreignChangeAddr := newUnifiedAddressForDifferentAccount(t, jd, 0).Address
 	planMultiOutput := buildSingleNoteSendPlan(t, rpc, jd, []types.TxOutput{
 		{ToAddress: toAddr, AmountZat: "1000000"},
 		{ToAddress: toAddr, AmountZat: "2000000"},
 	}, changeAddr, types.TxPlanKindWithdrawal)
-	planSweep := buildSingleNoteSweepPlan(t, rpc, jd, toAddr, toAddr)
+	planSweep := buildSingleNoteSweepPlan(t, rpc, jd, foreignChangeAddr, foreignChangeAddr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+
+	t.Run("rejects_foreign_change_address", func(t *testing.T) {
+		plan := planWithdrawal
+		plan.ChangeAddress = foreignChangeAddr
+
+		var lastErr error
+		for _, seed := range seeds {
+			_, err := txsign.Sign(ctx, plan, seed)
+			if err != nil && strings.Contains(err.Error(), "change_address_not_owned") {
+				return
+			}
+			lastErr = err
+		}
+		t.Fatalf("expected change ownership error, got %v", lastErr)
+	})
+
+	t.Run("rejects_implicit_201st_output", func(t *testing.T) {
+		plan := planWithdrawal
+		plan.Outputs = make([]types.TxOutput, 200)
+		for i := range plan.Outputs {
+			plan.Outputs[i] = types.TxOutput{ToAddress: toAddr, AmountZat: "1"}
+		}
+		plan.FeeZat = "1000000"
+
+		var lastErr error
+		for _, seed := range seeds {
+			_, err := txsign.Sign(ctx, plan, seed)
+			if err != nil && strings.Contains(err.Error(), "outputs_invalid") {
+				return
+			}
+			lastErr = err
+		}
+		t.Fatalf("expected total-output limit error, got %v", lastErr)
+	})
 
 	signOK := func(t *testing.T, plan types.TxPlan, expectChange bool) {
 		t.Helper()

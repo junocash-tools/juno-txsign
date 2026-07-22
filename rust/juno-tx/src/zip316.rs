@@ -175,7 +175,11 @@ pub fn encode_tlv_container(hrp: &str, items: &[Tlv<'_>]) -> Result<String, Zip3
 }
 
 #[cfg(test)]
-pub fn encode_unified_container(hrp: &str, typecode: u64, value: &[u8]) -> Result<String, Zip316Error> {
+pub fn encode_unified_container(
+    hrp: &str,
+    typecode: u64,
+    value: &[u8],
+) -> Result<String, Zip316Error> {
     let items = [Tlv { typecode, value }];
     encode_tlv_container(hrp, &items)
 }

@@ -69,7 +69,7 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(w, "  juno-txsign sign-digest --digest <0x32-byte-hex> [--operator-endpoint <url> ...] --json")
 	fmt.Fprintln(w, "  juno-txsign serve --listen <addr>")
 	fmt.Fprintln(w, "  juno-txsign ext-prepare --txplan <path|-> --ufvk <jview...> [--out-prepared <path>] [--out-requests <path>]")
-	fmt.Fprintln(w, "  juno-txsign ext-finalize --prepared-tx <path> --sigs <path> [--out <path>] [--json] [--action-indices]")
+	fmt.Fprintln(w, "  juno-txsign ext-finalize --prepared-tx <path> --sigs <path> [--out <path>] [--json]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Notes:")
 	fmt.Fprintln(w, "  - Do not log or store seeds/spending keys.")
@@ -100,7 +100,6 @@ func runSign(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err.Error())
 		return 2
 	}
-
 	txplanPath = strings.TrimSpace(txplanPath)
 	if txplanPath == "" {
 		return writeErr(stdout, stderr, jsonOut, "invalid_request", "txplan is required")
@@ -545,11 +544,20 @@ func runExtFinalize(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&sigsPath, "sigs", "", "path to spend-auth signature submission JSON")
 	fs.StringVar(&outPath, "out", "", "optional path to write raw tx hex")
 	fs.BoolVar(&jsonOut, "json", false, "JSON output")
-	fs.BoolVar(&actionIndices, "action-indices", false, "include Orchard output action indices (requires --json)")
+	fs.BoolVar(&actionIndices, "action-indices", false, "unsupported legacy flag")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return 2
+	}
+	if actionIndices {
+		return writeErr(
+			stdout,
+			stderr,
+			jsonOut,
+			"invalid_request",
+			"--action-indices is not supported by ext-finalize; use the integrity-bound ext-prepare artifact",
+		)
 	}
 
 	preparedPath = strings.TrimSpace(preparedPath)
@@ -594,21 +602,14 @@ func runExtFinalize(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if jsonOut {
-		data := cliout.SignJSONData(
-			cliout.SignOutput{
-				TxID:                       res.TxID,
-				RawTxHex:                   res.RawTxHex,
-				FeeZat:                     res.FeeZat,
-				OrchardOutputActionIndices: res.OrchardOutputActionIndices,
-				OrchardChangeActionIndex:   res.OrchardChangeActionIndex,
-			},
-			actionIndices,
-		)
-
 		_ = json.NewEncoder(stdout).Encode(map[string]any{
 			"version": jsonVersionV1,
 			"status":  "ok",
-			"data":    data,
+			"data": map[string]any{
+				"txid":       res.TxID,
+				"raw_tx_hex": res.RawTxHex,
+				"fee_zat":    res.FeeZat,
+			},
 		})
 		return 0
 	}

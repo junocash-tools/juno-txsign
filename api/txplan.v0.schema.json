@@ -33,17 +33,17 @@
     },
     "coin_type": {
       "type": "integer",
-      "minimum": 0,
-      "maximum": 4294967295
+      "enum": [8133, 8134, 8135]
     },
     "account": {
       "type": "integer",
       "minimum": 0,
-      "maximum": 4294967295
+      "maximum": 2147483647
     },
     "chain": {
       "type": "string",
-      "description": "Chain identifier (e.g. mainnet/regtest)"
+      "enum": ["main", "mainnet", "test", "testnet", "regtest"],
+      "description": "Chain identifier bound to coin_type"
     },
     "branch_id": {
       "type": "integer",
@@ -67,6 +67,7 @@
     "outputs": {
       "type": "array",
       "minItems": 1,
+      "maxItems": 200,
       "items": {
         "$ref": "#/$defs/TxOutput"
       }
@@ -82,6 +83,8 @@
     },
     "notes": {
       "type": "array",
+      "minItems": 1,
+      "maxItems": 200,
       "items": {
         "$ref": "#/$defs/OrchardSpendNote"
       }
@@ -91,6 +94,30 @@
       "type": ["object", "array", "string", "number", "integer", "boolean", "null"]
     }
   },
+  "allOf": [
+    {
+      "oneOf": [
+        {
+          "properties": {
+            "chain": { "enum": ["main", "mainnet"] },
+            "coin_type": { "const": 8133 }
+          }
+        },
+        {
+          "properties": {
+            "chain": { "enum": ["test", "testnet"] },
+            "coin_type": { "const": 8134 }
+          }
+        },
+        {
+          "properties": {
+            "chain": { "const": "regtest" },
+            "coin_type": { "const": 8135 }
+          }
+        }
+      ]
+    }
+  ],
   "$defs": {
     "TxOutput": {
       "type": "object",
@@ -126,7 +153,7 @@
         },
         "action_nullifier": {
           "type": "string",
-          "description": "Orchard action nullifier (hex)"
+          "description": "Nullifier field from the Orchard action that created this note; this is note-decryption context, not the nullifier later derived when spending the note (hex)"
         },
         "cmx": {
           "type": "string",

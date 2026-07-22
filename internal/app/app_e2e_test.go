@@ -9,13 +9,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Abdullah1738/juno-sdk-go/types"
-	"github.com/Abdullah1738/juno-txsign/internal/testutil/junocashdutil"
 )
 
 func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
@@ -24,6 +22,7 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 	changeAddr := unifiedAddress(t, jd, 0)
 	mineAndShieldOnce(t, jd, changeAddr)
 	toAddr := unifiedAddress(t, jd, 0)
+	foreignDestination := newUnifiedAddressForDifferentAccount(t, jd, 0)
 
 	seeds := seedCandidatesFromNode(t, jd)
 
@@ -103,8 +102,10 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 		}
 	}
 
-	broadcastMineAndAssert := func(t *testing.T, plan types.TxPlan, res signResult, spentNoteID string) {
+	broadcastMineAndAssert := func(t *testing.T, plan types.TxPlan, res signResult, outputAccounts []uint32) {
 		t.Helper()
+		assertDecodedOrchardTransaction(t, ctx, rpc, res.RawTxHex, res.TxID, plan, res.OrchardOutputActionIndices, res.OrchardChangeActionIndex)
+		totalInput := orchardPlanInputValue(t, ctx, jd, 0, plan)
 
 		var acceptedTxID string
 		if err := rpc.Call(ctx, "sendrawtransaction", []any{res.RawTxHex}, &acceptedTxID); err != nil {
@@ -134,62 +135,7 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 			t.Fatalf("tx not mined")
 		}
 
-		waitSpendableOrchardNoteNot(t, jd, spentNoteID)
-
-		// Verify Orchard action indices match the notes the node wallet sees for this tx.
-		if len(res.OrchardOutputActionIndices) != len(plan.Outputs) {
-			t.Fatalf("orchard output index count mismatch: got %d want %d", len(res.OrchardOutputActionIndices), len(plan.Outputs))
-		}
-
-		notes, err := junocashdutil.ListUnspentOrchard(ctx, jd, 1, 0)
-		if err != nil {
-			t.Fatalf("z_listunspent: %v", err)
-		}
-		var txNotes []junocashdutil.UnspentOrchardNote
-		for _, n := range notes {
-			if strings.EqualFold(n.TxID, res.TxID) {
-				txNotes = append(txNotes, n)
-			}
-		}
-		if len(txNotes) == 0 {
-			t.Fatalf("expected unspent orchard notes for tx")
-		}
-
-		for i := range plan.Outputs {
-			amt, err := strconv.ParseUint(strings.TrimSpace(plan.Outputs[i].AmountZat), 10, 64)
-			if err != nil {
-				t.Fatalf("outputs[%d].amount_zat invalid: %v", i, err)
-			}
-			wantIdx := res.OrchardOutputActionIndices[i]
-
-			var ok bool
-			for _, n := range txNotes {
-				if n.OutIndex == wantIdx && n.AmountZat == amt {
-					ok = true
-					break
-				}
-			}
-			if !ok {
-				t.Fatalf("missing orchard note for outputs[%d] at action_index=%d", i, wantIdx)
-			}
-		}
-
-		if res.OrchardChangeActionIndex != nil {
-			wantIdx := *res.OrchardChangeActionIndex
-			var ok bool
-			for _, n := range txNotes {
-				if n.OutIndex == wantIdx {
-					if n.AmountZat == 0 {
-						t.Fatalf("change note amount is 0")
-					}
-					ok = true
-					break
-				}
-			}
-			if !ok {
-				t.Fatalf("missing orchard change note at action_index=%d", wantIdx)
-			}
-		}
+		waitForOrchardPlanEffects(t, ctx, jd, res.TxID, 0, totalInput, plan, res.OrchardOutputActionIndices, outputAccounts, res.OrchardChangeActionIndex, 0)
 	}
 
 	t.Run("withdrawal", func(t *testing.T) {
@@ -198,7 +144,7 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 		if res.OrchardChangeActionIndex == nil {
 			t.Fatalf("expected change output")
 		}
-		broadcastMineAndAssert(t, plan, res, plan.Notes[0].NoteID)
+		broadcastMineAndAssert(t, plan, res, []uint32{0})
 	})
 
 	t.Run("multi_output", func(t *testing.T) {
@@ -210,15 +156,15 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 		if res.OrchardChangeActionIndex == nil {
 			t.Fatalf("expected change output")
 		}
-		broadcastMineAndAssert(t, plan, res, plan.Notes[0].NoteID)
+		broadcastMineAndAssert(t, plan, res, []uint32{0, 0})
 	})
 
 	t.Run("sweep", func(t *testing.T) {
-		plan := buildSingleNoteSweepPlan(t, rpc, jd, toAddr, toAddr)
+		plan := buildSingleNoteSweepPlan(t, rpc, jd, foreignDestination.Address, foreignDestination.Address)
 		res := signWithAnySeed(t, plan)
-		broadcastMineAndAssert(t, plan, res, plan.Notes[0].NoteID)
 		if res.OrchardChangeActionIndex != nil {
 			t.Fatalf("expected no change output")
 		}
+		broadcastMineAndAssert(t, plan, res, []uint32{foreignDestination.Account})
 	})
 }

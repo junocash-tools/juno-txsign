@@ -21,6 +21,12 @@ type Result struct {
 	OrchardChangeActionIndex   *uint32
 }
 
+type ExtFinalizeResult struct {
+	TxID     string
+	RawTxHex string
+	FeeZat   string
+}
+
 type SigningRequest struct {
 	Sighash     string `json:"sighash"`
 	ActionIndex uint32 `json:"action_index"`
@@ -41,8 +47,8 @@ type ExtPrepareResult struct {
 }
 
 type SpendAuthSig struct {
-	ActionIndex   uint32 `json:"action_index"`
-	SpendAuthSig  string `json:"spend_auth_sig"`
+	ActionIndex  uint32 `json:"action_index"`
+	SpendAuthSig string `json:"spend_auth_sig"`
 }
 
 type SpendAuthSigSubmission struct {
@@ -86,6 +92,46 @@ func parseTxResponse(raw string) (Result, error) {
 		return Result{}, fmt.Errorf("txsign: %s", strings.TrimSpace(resp.Error))
 	default:
 		return Result{}, errors.New("txsign: invalid response")
+	}
+}
+
+func parseExtFinalizeResponse(raw string) (ExtFinalizeResult, error) {
+	var resp struct {
+		Status                     string          `json:"status"`
+		TxID                       string          `json:"txid,omitempty"`
+		RawTxHex                   string          `json:"raw_tx_hex,omitempty"`
+		FeeZat                     string          `json:"fee_zat,omitempty"`
+		OrchardOutputActionIndices json.RawMessage `json:"orchard_output_action_indices,omitempty"`
+		OrchardChangeActionIndex   json.RawMessage `json:"orchard_change_action_index,omitempty"`
+		Error                      string          `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		return ExtFinalizeResult{}, errors.New("txsign: invalid response")
+	}
+	if len(resp.OrchardOutputActionIndices) != 0 || len(resp.OrchardChangeActionIndex) != 0 {
+		return ExtFinalizeResult{}, errors.New("txsign: invalid response")
+	}
+
+	switch resp.Status {
+	case "ok":
+		txid := strings.ToLower(strings.TrimSpace(resp.TxID))
+		rawTx := strings.TrimSpace(resp.RawTxHex)
+		fee := strings.TrimSpace(resp.FeeZat)
+		if txid == "" || rawTx == "" || fee == "" {
+			return ExtFinalizeResult{}, errors.New("txsign: invalid response")
+		}
+		return ExtFinalizeResult{
+			TxID:     txid,
+			RawTxHex: rawTx,
+			FeeZat:   fee,
+		}, nil
+	case "err":
+		if strings.TrimSpace(resp.Error) == "" {
+			return ExtFinalizeResult{}, errors.New("txsign: failed")
+		}
+		return ExtFinalizeResult{}, fmt.Errorf("txsign: %s", strings.TrimSpace(resp.Error))
+	default:
+		return ExtFinalizeResult{}, errors.New("txsign: invalid response")
 	}
 }
 
@@ -147,11 +193,11 @@ func ExtPrepare(ctx context.Context, txplan types.TxPlan, ufvk string) (ExtPrepa
 	}
 }
 
-func ExtFinalize(ctx context.Context, preparedTx PreparedTx, sigs SpendAuthSigSubmission) (Result, error) {
+func ExtFinalize(ctx context.Context, preparedTx PreparedTx, sigs SpendAuthSigSubmission) (ExtFinalizeResult, error) {
 	_ = ctx // reserved for future (ffi call is synchronous)
 
 	if len(preparedTx) == 0 {
-		return Result{}, errors.New("txsign: prepared_tx is required")
+		return ExtFinalizeResult{}, errors.New("txsign: prepared_tx is required")
 	}
 
 	req := struct {
@@ -164,13 +210,13 @@ func ExtFinalize(ctx context.Context, preparedTx PreparedTx, sigs SpendAuthSigSu
 
 	b, err := json.Marshal(req)
 	if err != nil {
-		return Result{}, errors.New("txsign: marshal request")
+		return ExtFinalizeResult{}, errors.New("txsign: marshal request")
 	}
 
 	raw, err := ffi.ExtFinalizeJSON(string(b))
 	if err != nil {
-		return Result{}, err
+		return ExtFinalizeResult{}, err
 	}
 
-	return parseTxResponse(raw)
+	return parseExtFinalizeResponse(raw)
 }
