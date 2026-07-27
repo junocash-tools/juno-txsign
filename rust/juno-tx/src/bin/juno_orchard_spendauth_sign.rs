@@ -11,12 +11,11 @@ use rand::{rngs::StdRng, SeedableRng as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
-    env,
-    fs,
+    env, fs,
     io::{self, Write as _},
 };
-use zip32::AccountId;
 use zeroize::Zeroize;
+use zip32::AccountId;
 
 const V0: &str = "v0";
 
@@ -107,14 +106,10 @@ fn main() {
             "--seed-base64" => seed_base64 = args.next(),
             "--seed-file" => seed_file = args.next(),
             "--coin-type" => {
-                coin_type = args
-                    .next()
-                    .and_then(|s| s.parse::<u32>().ok());
+                coin_type = args.next().and_then(|s| s.parse::<u32>().ok());
             }
             "--account" => {
-                account = args
-                    .next()
-                    .and_then(|s| s.parse::<u32>().ok());
+                account = args.next().and_then(|s| s.parse::<u32>().ok());
             }
             "--out" => out_path = args.next(),
             _ => {
@@ -201,8 +196,8 @@ fn main() {
 
     let res = (|| -> Result<SpendAuthSigSubmissionV0, String> {
         let acc = AccountId::try_from(account).map_err(|_| "account invalid".to_string())?;
-        let sk =
-            SpendingKey::from_zip32_seed(&seed, coin_type, acc).map_err(|_| "seed invalid".to_string())?;
+        let sk = SpendingKey::from_zip32_seed(&seed, coin_type, acc)
+            .map_err(|_| "seed invalid".to_string())?;
         let ask = SpendAuthorizingKey::from(&sk);
 
         let mut seen = std::collections::BTreeSet::<u32>::new();

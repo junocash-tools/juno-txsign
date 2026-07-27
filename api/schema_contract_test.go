@@ -131,6 +131,51 @@ func TestExternalSigningSchemasMatchRuntimeLimits(t *testing.T) {
 	}
 }
 
+func TestTxPlanSignServiceSchemaBindsAttemptsAndReplay(t *testing.T) {
+	schema := loadSchema(t, "txplan_sign_service.v1.schema.json")
+	defs := objectField(t, schema, "$defs")
+
+	request := objectField(t, defs, "SignRequest")
+	required := make(map[string]bool)
+	for _, value := range asArray(t, field(t, request, "required")) {
+		required[asString(t, value)] = true
+	}
+	for _, name := range []string{"version", "attempt_id", "plan_digest", "txplan_base64"} {
+		if !required[name] {
+			t.Fatalf("sign request does not require %s", name)
+		}
+	}
+	if got := asString(t, field(t, objectField(t, defs, "AttemptID"), "pattern")); got != `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$` {
+		t.Fatalf("attempt pattern=%q", got)
+	}
+	if got := asString(t, field(t, objectField(t, defs, "PlanDigest"), "pattern")); got != `^sha256:[0-9a-f]{64}$` {
+		t.Fatalf("plan digest pattern=%q", got)
+	}
+
+	data := objectField(t, defs, "SignData")
+	properties := objectField(t, data, "properties")
+	if got, ok := field(t, objectField(t, properties, "replayed"), "type").(string); !ok || got != "boolean" {
+		t.Fatalf("replayed type=%#v", field(t, objectField(t, properties, "replayed"), "type"))
+	}
+	indices := objectField(t, properties, "orchard_output_action_indices")
+	requireArrayContract(t, indices, 1, 200, true)
+	requireInteger(t, objectField(t, indices, "items"), "maximum", 199)
+}
+
+func TestTxPlanSignerBindingsSchemaUsesExactTuples(t *testing.T) {
+	schema := loadSchema(t, "txplan_signer_bindings.v1.schema.json")
+	bindings := objectField(t, objectField(t, schema, "properties"), "bindings")
+	requireArrayContract(t, bindings, 1, 256, true)
+	binding := objectField(t, objectField(t, schema, "$defs"), "Binding")
+	properties := objectField(t, binding, "properties")
+	requireInteger(t, objectField(t, properties, "account"), "maximum", 2_147_483_647)
+	requireStrings(t, field(t, objectField(t, properties, "network"), "enum"), []string{"mainnet", "testnet", "regtest"})
+	additional, ok := field(t, binding, "additionalProperties").(bool)
+	if !ok || additional {
+		t.Fatal("binding entries must reject additional properties")
+	}
+}
+
 func loadSchema(t *testing.T, name string) map[string]any {
 	t.Helper()
 	_, sourceFile, _, ok := runtime.Caller(0)

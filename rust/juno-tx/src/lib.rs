@@ -171,6 +171,21 @@ enum TxResponse {
     },
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeriveUfvkRequest {
+    seed_base64: String,
+    coin_type: u32,
+    account: u32,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum DeriveUfvkResponse {
+    Ok { ufvk: String },
+    Err { error: String },
+}
+
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum ExtFinalizeResponse {
@@ -506,14 +521,13 @@ fn map_ufvk_zip316_error(e: zip316::Zip316Error) -> TxBuildError {
     match e {
         Zip316Error::Bech32DecodeFailed
         | Zip316Error::PaddingInvalid
-        | Zip316Error::F4JumbleFailed => TxBuildError::UfvkInvalidBech32m,
-        Zip316Error::HrpMismatch => TxBuildError::UfvkHrpMismatch,
-        Zip316Error::TlvInvalid | Zip316Error::TlvTrailingBytes => TxBuildError::UfvkTlvInvalid,
-        #[cfg(test)]
-        Zip316Error::HrpTooLong
+        | Zip316Error::F4JumbleFailed
+        | Zip316Error::HrpTooLong
         | Zip316Error::InvalidHrp
         | Zip316Error::PayloadTooShort
         | Zip316Error::Bech32EncodeFailed => TxBuildError::UfvkInvalidBech32m,
+        Zip316Error::HrpMismatch => TxBuildError::UfvkHrpMismatch,
+        Zip316Error::TlvInvalid | Zip316Error::TlvTrailingBytes => TxBuildError::UfvkTlvInvalid,
     }
 }
 
@@ -1933,6 +1947,69 @@ fn handle(req: TxRequest) -> Result<TxResponse, TxBuildError> {
     })
 }
 
+fn derive_ufvk(req: DeriveUfvkRequest) -> Result<String, TxBuildError> {
+    if req.account >= BIP32_HARDENED_KEY_LIMIT {
+        return Err(TxBuildError::AccountInvalid);
+    }
+    let (_, ufvk_hrp) = network_hrps(req.coin_type)?;
+    let mut seed = decode_seed(&req.seed_base64)?;
+    let result = (|| {
+        let account =
+            zip32::AccountId::try_from(req.account).map_err(|_| TxBuildError::AccountInvalid)?;
+        let spending_key = SpendingKey::from_zip32_seed(&seed, req.coin_type, account)
+            .map_err(|_| TxBuildError::SeedInvalid)?;
+        let fvk = FullViewingKey::from(&spending_key);
+        zip316::encode_unified_container(ufvk_hrp, TYPECODE_ORCHARD, &fvk.to_bytes())
+            .map_err(|_| TxBuildError::UfvkInvalidBech32m)
+    })();
+    seed.zeroize();
+    result
+}
+
+/// Derives the Orchard-only UFVK used to verify private signer bindings.
+///
+/// The returned pointer must be freed with `juno_tx_string_free`.
+#[no_mangle]
+pub extern "C" fn juno_tx_derive_ufvk_json(req_json: *const c_char) -> *mut c_char {
+    fn to_c_string(v: DeriveUfvkResponse) -> *mut c_char {
+        let json = serde_json::to_string(&v)
+            .unwrap_or_else(|_| r#"{"status":"err","error":"serde_failed"}"#.to_string());
+        std::ffi::CString::new(json).expect("json").into_raw()
+    }
+
+    let res = std::panic::catch_unwind(|| {
+        if req_json.is_null() {
+            return DeriveUfvkResponse::Err {
+                error: TxBuildError::ReqJSONNull.to_string(),
+            };
+        }
+
+        let s = unsafe { std::ffi::CStr::from_ptr(req_json) }.to_string_lossy();
+        let parsed: DeriveUfvkRequest = match serde_json::from_str(&s) {
+            Ok(v) => v,
+            Err(_) => {
+                return DeriveUfvkResponse::Err {
+                    error: TxBuildError::InvalidJSON.to_string(),
+                };
+            }
+        };
+
+        match derive_ufvk(parsed) {
+            Ok(ufvk) => DeriveUfvkResponse::Ok { ufvk },
+            Err(error) => DeriveUfvkResponse::Err {
+                error: error.to_string(),
+            },
+        }
+    });
+
+    match res {
+        Ok(value) => to_c_string(value),
+        Err(_) => to_c_string(DeriveUfvkResponse::Err {
+            error: TxBuildError::Panic.to_string(),
+        }),
+    }
+}
+
 /// Builds and signs a Juno transaction described by a JSON request.
 ///
 /// The returned pointer must be freed with `juno_tx_string_free`.
@@ -2192,6 +2269,35 @@ mod tests {
             network_hrps(1),
             Err(TxBuildError::CoinTypeInvalid)
         ));
+    }
+
+    #[test]
+    fn derives_network_and_account_bound_ufvk() {
+        let seed = base64::engine::general_purpose::STANDARD.encode([7u8; 64]);
+        let main = derive_ufvk(DeriveUfvkRequest {
+            seed_base64: seed.clone(),
+            coin_type: JUNO_COIN_TYPE_MAINNET,
+            account: 0,
+        })
+        .expect("main UFVK");
+        let regtest = derive_ufvk(DeriveUfvkRequest {
+            seed_base64: seed.clone(),
+            coin_type: JUNO_COIN_TYPE_REGTEST,
+            account: 0,
+        })
+        .expect("regtest UFVK");
+        let account_one = derive_ufvk(DeriveUfvkRequest {
+            seed_base64: seed,
+            coin_type: JUNO_COIN_TYPE_MAINNET,
+            account: 1,
+        })
+        .expect("account-one UFVK");
+
+        assert!(main.starts_with("jview1"));
+        assert!(regtest.starts_with("jviewregtest1"));
+        assert_ne!(main, regtest);
+        assert_ne!(main, account_one);
+        assert!(decode_fvk_from_ufvk(&main, JUNO_COIN_TYPE_MAINNET).is_ok());
     }
 
     #[test]

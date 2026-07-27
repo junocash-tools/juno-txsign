@@ -148,6 +148,23 @@ func TestIntegration_SignAndBuildRawTx(t *testing.T) {
 	}
 
 	t.Run("withdrawal", func(t *testing.T) { signOK(t, planWithdrawal, true) })
+	t.Run("unix_socket_service", func(t *testing.T) {
+		res := signPlanViaUnixService(t, planWithdrawal, seeds)
+		if res.TxID == "" || res.RawTxHex == "" || res.OrchardChangeActionIndex == nil {
+			t.Fatalf("invalid service result: %+v", res)
+		}
+		var decoded struct {
+			Orchard struct {
+				Actions []any `json:"actions"`
+			} `json:"orchard"`
+		}
+		if err := rpc.Call(ctx, "decoderawtransaction", []any{res.RawTxHex}, &decoded); err != nil {
+			t.Fatalf("decode service transaction: %v", err)
+		}
+		if len(decoded.Orchard.Actions) < 2 {
+			t.Fatalf("service transaction Orchard actions=%d", len(decoded.Orchard.Actions))
+		}
+	})
 	t.Run("multi_output", func(t *testing.T) { signOK(t, planMultiOutput, true) })
 	t.Run("sweep", func(t *testing.T) { signOK(t, planSweep, false) })
 }

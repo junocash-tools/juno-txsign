@@ -1,6 +1,5 @@
 use bech32::primitives::checksum::Checksum;
 use bech32::primitives::decode::CheckedHrpstring;
-#[cfg(test)]
 use bech32::Hrp;
 use thiserror::Error;
 
@@ -28,18 +27,12 @@ const PADDING_LEN: usize = 16;
 
 #[derive(Debug, Error)]
 pub enum Zip316Error {
-    // Encoding-specific errors are only used in tests. In production, this crate only
-    // needs decoding support.
-    #[cfg(test)]
     #[error("hrp_too_long")]
     HrpTooLong,
-    #[cfg(test)]
     #[error("invalid_hrp")]
     InvalidHrp,
-    #[cfg(test)]
     #[error("payload_too_short")]
     PayloadTooShort,
-    #[cfg(test)]
     #[error("bech32_encode_failed")]
     Bech32EncodeFailed,
     #[error("bech32_decode_failed")]
@@ -56,14 +49,12 @@ pub enum Zip316Error {
     TlvTrailingBytes,
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub struct Tlv<'a> {
     pub typecode: u64,
     pub value: &'a [u8],
 }
 
-#[cfg(test)]
 fn write_compact_size(n: u64, out: &mut Vec<u8>) {
     if n <= 252 {
         out.push(n as u8);
@@ -114,7 +105,6 @@ fn read_compact_size(input: &mut &[u8]) -> Result<u64, Zip316Error> {
     }
 }
 
-#[cfg(test)]
 fn encode_zip316_bech32m(hrp: &str, raw_items_tlv: &[u8]) -> Result<String, Zip316Error> {
     if hrp.len() > PADDING_LEN {
         return Err(Zip316Error::HrpTooLong);
@@ -163,7 +153,6 @@ fn decode_zip316_bech32m(hrp_expected: &str, s: &str) -> Result<Vec<u8>, Zip316E
     Ok(bytes)
 }
 
-#[cfg(test)]
 pub fn encode_tlv_container(hrp: &str, items: &[Tlv<'_>]) -> Result<String, Zip316Error> {
     let mut payload = Vec::new();
     for item in items {
@@ -174,8 +163,7 @@ pub fn encode_tlv_container(hrp: &str, items: &[Tlv<'_>]) -> Result<String, Zip3
     encode_zip316_bech32m(hrp, &payload)
 }
 
-#[cfg(test)]
-pub fn encode_unified_container(
+pub(crate) fn encode_unified_container(
     hrp: &str,
     typecode: u64,
     value: &[u8],

@@ -151,6 +151,50 @@ func Sign(ctx context.Context, txplan types.TxPlan, seedBase64 string) (Result, 
 	return parseTxResponse(raw)
 }
 
+// DeriveUFVK derives the Orchard-only unified full viewing key used to bind a
+// private signer seed to one network/account at startup.
+func DeriveUFVK(ctx context.Context, seedBase64 string, coinType, account uint32) (string, error) {
+	_ = ctx // the local FFI call is synchronous
+	request, err := json.Marshal(struct {
+		SeedBase64 string `json:"seed_base64"`
+		CoinType   uint32 `json:"coin_type"`
+		Account    uint32 `json:"account"`
+	}{
+		SeedBase64: strings.TrimSpace(seedBase64),
+		CoinType:   coinType,
+		Account:    account,
+	})
+	if err != nil {
+		return "", errors.New("txsign: marshal UFVK derivation request")
+	}
+	raw, err := ffi.DeriveUFVKJSON(string(request))
+	if err != nil {
+		return "", err
+	}
+	var response struct {
+		Status string `json:"status"`
+		UFVK   string `json:"ufvk,omitempty"`
+		Error  string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(raw), &response); err != nil {
+		return "", errors.New("txsign: invalid UFVK derivation response")
+	}
+	switch response.Status {
+	case "ok":
+		if strings.TrimSpace(response.UFVK) == "" {
+			return "", errors.New("txsign: invalid UFVK derivation response")
+		}
+		return strings.TrimSpace(response.UFVK), nil
+	case "err":
+		if strings.TrimSpace(response.Error) == "" {
+			return "", errors.New("txsign: UFVK derivation failed")
+		}
+		return "", fmt.Errorf("txsign: %s", strings.TrimSpace(response.Error))
+	default:
+		return "", errors.New("txsign: invalid UFVK derivation response")
+	}
+}
+
 func ExtPrepare(ctx context.Context, txplan types.TxPlan, ufvk string) (ExtPrepareResult, error) {
 	_ = ctx // reserved for future (ffi call is synchronous)
 

@@ -159,6 +159,20 @@ func TestE2E_SignThenBroadcastAndMine(t *testing.T) {
 		broadcastMineAndAssert(t, plan, res, []uint32{0, 0})
 	})
 
+	t.Run("unix_socket_service", func(t *testing.T) {
+		plan := buildSingleNoteWithdrawalPlan(t, rpc, jd, toAddr, changeAddr, 1_000_000)
+		res := signPlanViaUnixServiceBinary(t, plan, seeds)
+		if res.OrchardChangeActionIndex == nil {
+			t.Fatalf("expected change output")
+		}
+		broadcastMineAndAssert(t, plan, signResult{
+			TxID:                       res.TxID,
+			RawTxHex:                   res.RawTxHex,
+			OrchardOutputActionIndices: res.OrchardOutputActionIndices,
+			OrchardChangeActionIndex:   res.OrchardChangeActionIndex,
+		}, []uint32{0})
+	})
+
 	t.Run("sweep", func(t *testing.T) {
 		plan := buildSingleNoteSweepPlan(t, rpc, jd, foreignDestination.Address, foreignDestination.Address)
 		res := signWithAnySeed(t, plan)

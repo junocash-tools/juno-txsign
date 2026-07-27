@@ -118,6 +118,26 @@ func TestRunServe_HelpIncludesListen(t *testing.T) {
 	}
 }
 
+func TestRunServeTxPlan_HelpDocumentsPrivateDurableBoundary(t *testing.T) {
+	var out, errBuf bytes.Buffer
+
+	code := RunWithIO([]string{"serve-txplan", "--help"}, &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("code=%d want=0 stderr=%q", code, errBuf.String())
+	}
+	if errBuf.Len() != 0 {
+		t.Fatalf("unexpected stderr: %q", errBuf.String())
+	}
+	for _, required := range []string{"--socket", "--journal-dir", "--bindings-file", "POST /v1/sign"} {
+		if !strings.Contains(out.String(), required) {
+			t.Fatalf("help missing %q: %q", required, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "--listen") {
+		t.Fatalf("private TxPlan service must not advertise TCP listening: %q", out.String())
+	}
+}
+
 func TestRunSignDigest_InvalidDigest_ErrorEnvelope(t *testing.T) {
 	t.Setenv(digestsign.EnvSignerKeys, "4c0883a69102937d6231471b5dbb6204fe512961708279f3136f8f5d7f7f5f5a")
 

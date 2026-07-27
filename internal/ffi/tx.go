@@ -29,6 +29,19 @@ func BuildTxJSON(reqJSON string) (string, error) {
 	return C.GoString(out), nil
 }
 
+func DeriveUFVKJSON(reqJSON string) (string, error) {
+	cReq := C.CString(reqJSON)
+	defer C.free(unsafe.Pointer(cReq))
+
+	out := C.juno_tx_derive_ufvk_json(cReq)
+	if out == nil {
+		return "", errNull
+	}
+	defer C.juno_tx_string_free(out)
+
+	return C.GoString(out), nil
+}
+
 func ExtPrepareJSON(reqJSON string) (string, error) {
 	cReq := C.CString(reqJSON)
 	defer C.free(unsafe.Pointer(cReq))

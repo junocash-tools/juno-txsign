@@ -1,6 +1,8 @@
 package txsign
 
 import (
+	"context"
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -23,4 +25,34 @@ func TestParseExtFinalizeResponseOmitsActionMappings(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDeriveUFVKBindsSeedNetworkAndAccount(t *testing.T) {
+	seed := base64.StdEncoding.EncodeToString(bytesOf(64, 7))
+	main, err := DeriveUFVK(context.Background(), seed, 8133, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regtest, err := DeriveUFVK(context.Background(), seed, 8135, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountOne, err := DeriveUFVK(context.Background(), seed, 8133, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(main, "jview1") || !strings.HasPrefix(regtest, "jviewregtest1") {
+		t.Fatalf("unexpected UFVK prefixes: main=%q regtest=%q", main, regtest)
+	}
+	if main == regtest || main == accountOne {
+		t.Fatal("UFVK derivation is not bound to network/account")
+	}
+}
+
+func bytesOf(length int, value byte) []byte {
+	result := make([]byte, length)
+	for i := range result {
+		result[i] = value
+	}
+	return result
 }

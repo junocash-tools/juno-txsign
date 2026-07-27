@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Private TxPlan signer bindings v1",
+  "type": "object",
+  "required": ["version", "bindings"],
+  "properties": {
+    "version": { "const": "v1" },
+    "bindings": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/Binding" }
+    }
+  },
+  "$defs": {
+    "Binding": {
+      "type": "object",
+      "required": ["wallet_id", "account", "network", "ufvk"],
+      "properties": {
+        "wallet_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "account": { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+        "network": { "type": "string", "enum": ["mainnet", "testnet", "regtest"] },
+        "ufvk": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "network": { "const": "mainnet" },
+                "ufvk": { "pattern": "^jview1" }
+              }
+            },
+            {
+              "properties": {
+                "network": { "const": "testnet" },
+                "ufvk": { "pattern": "^jviewtest1" }
+              }
+            },
+            {
+              "properties": {
+                "network": { "const": "regtest" },
+                "ufvk": { "pattern": "^jviewregtest1" }
+              }
+            }
+          ]
+        }
+      ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

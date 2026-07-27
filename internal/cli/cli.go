@@ -19,6 +19,7 @@ import (
 	"github.com/Abdullah1738/juno-txsign/internal/cliout"
 	"github.com/Abdullah1738/juno-txsign/internal/digestsign"
 	"github.com/Abdullah1738/juno-txsign/internal/digestsignhttp"
+	"github.com/Abdullah1738/juno-txsign/internal/txplansignservice"
 	"github.com/Abdullah1738/juno-txsign/pkg/txsign"
 )
 
@@ -54,6 +55,8 @@ func RunWithIO(args []string, stdout, stderr io.Writer) int {
 		return runSignDigest(args[1:], stdout, stderr)
 	case "serve":
 		return runServe(args[1:], stdout, stderr)
+	case "serve-txplan":
+		return runServeTxPlan(args[1:], stdout, stderr)
 	case "ext-prepare":
 		return runExtPrepare(args[1:], stdout, stderr)
 	case "ext-finalize":
@@ -74,6 +77,7 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(w, "  juno-txsign sign --txplan <path|-> --seed-base64 <b64> [--out <path>] [--out-result <path>] [--json] [--action-indices]")
 	fmt.Fprintln(w, "  juno-txsign sign-digest --digest <0x32-byte-hex> [--operator-endpoint <url> ...] --json")
 	fmt.Fprintln(w, "  juno-txsign serve --listen <addr>")
+	fmt.Fprintln(w, "  juno-txsign serve-txplan --socket <absolute-path> --journal-dir <path> --seed-file <path> --bindings-file <path>")
 	fmt.Fprintln(w, "  juno-txsign ext-prepare --txplan <path|-> --ufvk <jview...> [--out-prepared <path>] [--out-requests <path>] [--out-result <path>]")
 	fmt.Fprintln(w, "  juno-txsign ext-finalize --prepared-tx <path> --sigs <path> [--out <path>] [--out-result <path>] [--json]")
 	fmt.Fprintln(w, "")
@@ -82,6 +86,7 @@ func writeUsage(w io.Writer) {
 	fmt.Fprintln(w, "  - sign-digest reads signer keys from JUNO_TXSIGN_SIGNER_KEYS (comma-separated 32-byte hex keys).")
 	fmt.Fprintln(w, "  - sign and ext-* remain offline; sign-digest can also query remote operator endpoints.")
 	fmt.Fprintln(w, "  - serve exposes POST /v1/sign-digest and GET /healthz on the listen address.")
+	fmt.Fprintln(w, "  - serve-txplan exposes full TxPlan signing only on an owner-only Unix socket.")
 }
 
 func runSign(args []string, stdout, stderr io.Writer) int {
@@ -525,6 +530,129 @@ func runServe(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+func runServeTxPlan(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("serve-txplan", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	var socketPath string
+	var journalDir string
+	var seedFile string
+	var bindingsFile string
+	var maxConcurrency int
+	var maxBodyBytes int64
+	var maxPlanBytes int64
+	var shutdownTimeout time.Duration
+
+	fs.StringVar(&socketPath, "socket", "", "absolute Unix socket path")
+	fs.StringVar(&journalDir, "journal-dir", "", "owner-only durable result journal directory")
+	fs.StringVar(&seedFile, "seed-file", "", "owner-only file containing the base64 seed")
+	fs.StringVar(&bindingsFile, "bindings-file", "", "owner-only wallet/account/network/UFVK bindings JSON")
+	fs.IntVar(&maxConcurrency, "max-concurrency", 1, "maximum simultaneous signing operations (1-16)")
+	fs.Int64Var(&maxBodyBytes, "max-body-bytes", 5<<20, "maximum sign request body bytes")
+	fs.Int64Var(&maxPlanBytes, "max-plan-bytes", 3<<20, "maximum decoded TxPlan bytes")
+	fs.DurationVar(&shutdownTimeout, "shutdown-timeout", 10*time.Minute, "time allowed for in-flight signing to finish")
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			writeServeTxPlanUsage(stdout)
+			return 0
+		}
+		fmt.Fprintln(stderr, err.Error())
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "serve-txplan does not accept positional arguments")
+		return 2
+	}
+	if shutdownTimeout <= 0 || shutdownTimeout > 30*time.Minute {
+		fmt.Fprintln(stderr, "shutdown-timeout must be greater than zero and at most 30m")
+		return 1
+	}
+
+	seed, err := txplansignservice.LoadSeed(seedFile, os.Getenv(txplansignservice.EnvSeedBase64))
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 1
+	}
+	bindings, err := txplansignservice.LoadBindings(bindingsFile)
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 1
+	}
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err = txplansignservice.VerifySeedBindings(verifyCtx, seed, bindings)
+	verifyCancel()
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 1
+	}
+	journal, err := txplansignservice.OpenJournal(journalDir)
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 1
+	}
+	defer func() { _ = journal.Close() }()
+
+	api, err := txplansignservice.New(
+		journal,
+		txplansignservice.NewSeedSigner(seed),
+		txplansignservice.Policy{Bindings: bindings},
+		maxConcurrency,
+		txplansignservice.WithMaxBodyBytes(maxBodyBytes),
+		txplansignservice.WithMaxPlanBytes(maxPlanBytes),
+	)
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 1
+	}
+
+	listener, err := txplansignservice.OpenUnixListener(socketPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err.Error())
+		return 1
+	}
+	defer func() { _ = listener.Close() }()
+
+	srv := &http.Server{
+		Handler:           api.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      10 * time.Minute,
+		IdleTimeout:       60 * time.Second,
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.Serve(listener)
+	}()
+
+	select {
+	case err := <-errCh:
+		if err == nil || errors.Is(err, http.ErrServerClosed) {
+			return 0
+		}
+		fmt.Fprintln(stderr, err.Error())
+		return 1
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		err := srv.Shutdown(shutdownCtx)
+		cancel()
+		if err != nil {
+			_ = srv.Close()
+			fmt.Fprintln(stderr, "txplan signer: graceful shutdown timed out; pending attempts remain fail-closed")
+			return 1
+		}
+		serveErr := <-errCh
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			fmt.Fprintln(stderr, serveErr.Error())
+			return 1
+		}
+		return 0
+	}
+}
+
 func writeSignDigestUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  juno-txsign sign-digest --digest <0x32-byte-hex> [--operator-endpoint <url> ...] --json")
@@ -550,6 +678,27 @@ func writeServeUsage(w io.Writer) {
 	fmt.Fprintln(w, "Notes:")
 	fmt.Fprintln(w, "  - serve requires JUNO_TXSIGN_SIGNER_KEYS at startup.")
 	fmt.Fprintln(w, "  - Endpoints: GET /healthz, POST /v1/sign-digest")
+}
+
+func writeServeTxPlanUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  juno-txsign serve-txplan --socket <absolute-path> --journal-dir <path> (--seed-file <path> | JUNO_TXSIGN_SEED_BASE64=<base64>) --bindings-file <path>")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Flags:")
+	fmt.Fprintln(w, "  --socket             absolute owner-only Unix socket path")
+	fmt.Fprintln(w, "  --journal-dir        owner-only durable attempt/result journal")
+	fmt.Fprintln(w, "  --seed-file          owner-only non-symlink file containing canonical base64 seed")
+	fmt.Fprintln(w, "  --bindings-file      owner-only v1 JSON binding wallet/account/network to expected UFVK")
+	fmt.Fprintln(w, "  --max-concurrency    simultaneous signing limit (default 1, maximum 16)")
+	fmt.Fprintln(w, "  --max-body-bytes     request body limit (default 5242880)")
+	fmt.Fprintln(w, "  --max-plan-bytes     decoded TxPlan limit (default 3145728)")
+	fmt.Fprintln(w, "  --shutdown-timeout   graceful in-flight signing deadline (default 10m)")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Endpoints over the Unix socket only:")
+	fmt.Fprintln(w, "  GET /healthz")
+	fmt.Fprintln(w, "  POST /v1/sign")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "The seed is never accepted in an API request or written to the journal.")
 }
 
 type stringListFlag []string

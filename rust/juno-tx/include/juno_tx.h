@@ -17,6 +17,12 @@ extern "C" {
 // Privacy/safety: request JSON may contain seeds and other sensitive material. Do not log.
 char *juno_tx_build_tx_json(const char *req_json);
 
+// Derives an Orchard-only UFVK from seed, coin type, and account for signer
+// startup binding verification. Request JSON contains seed material; do not log.
+//
+// Returns {"status":"ok","ufvk":"..."} or {"status":"err","error":"..."}.
+char *juno_tx_derive_ufvk_json(const char *req_json);
+
 // Prepares a Juno Orchard transaction for external spend-auth signing.
 //
 // Returns a newly-allocated UTF-8 JSON string with one of:
@@ -35,8 +41,7 @@ char *juno_tx_ext_prepare_json(const char *req_json);
 // The returned pointer must be freed with `juno_tx_string_free`.
 char *juno_tx_ext_finalize_json(const char *req_json);
 
-// Frees a string returned by `juno_tx_build_tx_json`, `juno_tx_ext_prepare_json`, or
-// `juno_tx_ext_finalize_json`.
+// Frees a string returned by any function in this header.
 void juno_tx_string_free(char *s);
 
 #ifdef __cplusplus

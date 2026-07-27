@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Private TxPlan signing service v1",
+  "description": "Machine contracts for HTTP/1.1 over the owner-only juno-txsign Unix socket.",
+  "oneOf": [
+    { "$ref": "#/$defs/SignRequest" },
+    { "$ref": "#/$defs/SignSuccess" },
+    { "$ref": "#/$defs/ErrorResponse" },
+    { "$ref": "#/$defs/HealthResponse" }
+  ],
+  "$defs": {
+    "AttemptID": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "PlanDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 of the exact bytes decoded from txplan_base64."
+    },
+    "SignRequest": {
+      "type": "object",
+      "required": ["version", "attempt_id", "plan_digest", "txplan_base64"],
+      "properties": {
+        "version": { "const": "v1" },
+        "attempt_id": { "$ref": "#/$defs/AttemptID" },
+        "plan_digest": { "$ref": "#/$defs/PlanDigest" },
+        "txplan_base64": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "description": "Canonical standard-base64 encoding of the exact strict TxPlan v0 JSON bytes."
+        }
+      },
+      "additionalProperties": false
+    },
+    "SignData": {
+      "type": "object",
+      "required": [
+        "attempt_id",
+        "plan_digest",
+        "replayed",
+        "txid",
+        "raw_tx_hex",
+        "fee_zat",
+        "orchard_output_action_indices",
+        "orchard_change_action_index"
+      ],
+      "properties": {
+        "attempt_id": { "$ref": "#/$defs/AttemptID" },
+        "plan_digest": { "$ref": "#/$defs/PlanDigest" },
+        "replayed": { "type": "boolean" },
+        "txid": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "raw_tx_hex": { "type": "string", "pattern": "^(?:[0-9a-f]{2})+$" },
+        "fee_zat": { "type": "string", "pattern": "^[0-9]+$" },
+        "orchard_output_action_indices": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 200,
+          "uniqueItems": true,
+          "items": { "type": "integer", "minimum": 0, "maximum": 199 }
+        },
+        "orchard_change_action_index": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 199
+        }
+      },
+      "additionalProperties": false
+    },
+    "SignSuccess": {
+      "type": "object",
+      "required": ["version", "status", "data"],
+      "properties": {
+        "version": { "const": "v1" },
+        "status": { "const": "ok" },
+        "data": { "$ref": "#/$defs/SignData" }
+      },
+      "additionalProperties": false
+    },
+    "ErrorBody": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "invalid_request",
+            "unsupported_media_type",
+            "plan_not_allowed",
+            "attempt_digest_conflict",
+            "attempt_outcome_unknown",
+            "signer_busy",
+            "journal_unsafe",
+            "journal_unavailable",
+            "journal_write_failed",
+            "signing_outcome_unknown"
+          ]
+        },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "required": ["version", "status", "error"],
+      "properties": {
+        "version": { "const": "v1" },
+        "status": { "const": "err" },
+        "error": { "$ref": "#/$defs/ErrorBody" }
+      },
+      "additionalProperties": false
+    },
+    "HealthData": {
+      "type": "object",
+      "required": ["service", "journal", "binding_count", "max_concurrency", "in_flight"],
+      "properties": {
+        "service": { "const": "txplan-signer" },
+        "journal": { "const": "ready" },
+        "binding_count": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "max_concurrency": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "in_flight": { "type": "integer", "minimum": 0, "maximum": 16 }
+      },
+      "additionalProperties": false
+    },
+    "HealthResponse": {
+      "type": "object",
+      "required": ["version", "status", "data"],
+      "properties": {
+        "version": { "const": "v1" },
+        "status": { "const": "ok" },
+        "data": { "$ref": "#/$defs/HealthData" }
+      },
+      "additionalProperties": false
+    }
+  }
+}
